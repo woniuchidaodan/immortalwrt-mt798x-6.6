@@ -1,0 +1,676 @@
+name: 🚀 编译 (Build) - MT798x 闭源 ImmortalWrt
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: '选择目标设备 (Target Device)'
+        type: choice
+        options:
+          - AX3000T
+          - WR30U
+        default: WR30U
+      layout:
+        description: '选择分区布局 (Partition Layout)'
+        type: choice
+        options:
+          - stock
+          - 112m
+        default: 112m
+      multithreading:
+        description: '开启多线程编译 (Enable multithreading build)'
+        type: boolean
+        default: true
+      ssh:
+        description: '使用 ssh 连接到编译环境 (Connect to the build environment using ssh)'
+        type: boolean
+        default: false
+
+env:
+  DEVICE: ${{ github.event.inputs.device || 'WR30U' }}
+  LAYOUT: ${{ github.event.inputs.layout || '112m' }}
+
+permissions: write-all
+
+jobs:
+  build:
+    if: ${{ inputs.ssh == false }}
+    runs-on: ubuntu-22.04
+    name: 🚀 编译 (Build)
+    outputs:
+      fw_version: ${{ steps.extract-version.outputs.fw_version }}
+    steps:
+      - name: 下载编译所需的依赖
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential ccache ecj fastjar file g++ gawk gettext git \
+            libelf-dev libncurses5-dev libncursesw5-dev libssl-dev python3 python3-distutils \
+            python3-setuptools python3-pyelftools rsync subversion swig time u-boot-tools \
+            unzip wget xsltproc zlib1g-dev
+
+      - name: 克隆当前仓库
+        uses: actions/checkout@v5
+
+      # ============================================================
+      # 闭源仓库：padavanonly/immortalwrt-mt798x-24.10
+      # 分支：openwrt-24.10-6.6
+      # ============================================================
+      - name: 克隆闭源 ImmortalWrt 仓库
+        uses: actions/checkout@v5
+        with:
+          repository: 'padavanonly/immortalwrt-mt798x-24.10'
+          ref: 'openwrt-24.10-6.6'
+          path: ImmortalWrt
+          fetch-depth: 0
+
+      - name: 校验 git 版本标签
+        working-directory: ImmortalWrt
+        run: |
+          echo "==== git describe ===="
+          git describe --tags 2>/dev/null || true
+          echo "==== git status ===="
+          git status
+          echo "==== 当前 commit ===="
+          git log -1 --oneline
+
+      # ============================================================
+      # 用户自定义软件包
+      # ============================================================
+      - name: 克隆 UA3F 源码
+        working-directory: ImmortalWrt
+        run: |
+          git clone https://github.com/SunBK201/UA3F.git package/UA3F
+
+      - name: 克隆 OpenAppFilter (OAF) 源码
+        working-directory: ImmortalWrt
+        run: |
+          git clone https://github.com/destan19/OpenAppFilter.git package/OpenAppFilter
+
+      # ============================================================
+      # quickstart 全家桶（从 kenzok8 源）
+      # ============================================================
+      - name: 从 kenzok8 源拉取 quickstart 及其全部依赖
+        working-directory: ImmortalWrt
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/kenzok8/openwrt-packages.git temp_kenzok8
+          cd temp_kenzok8
+          git sparse-checkout set quickstart luci-app-quickstart luci-app-store \
+            luci-lib-taskd luci-lib-xterm taskd
+          cd ..
+          mv temp_kenzok8/quickstart package/
+          mv temp_kenzok8/luci-app-quickstart package/
+          mv temp_kenzok8/luci-app-store package/
+          mv temp_kenzok8/luci-lib-taskd package/
+          mv temp_kenzok8/luci-lib-xterm package/
+          mv temp_kenzok8/taskd package/
+          rm -rf temp_kenzok8
+          echo "✅ quickstart 全部依赖链已拉取"
+
+      - name: 修改 quickstart Makefile 移除不必要依赖
+        working-directory: ImmortalWrt
+        run: |
+          for file in $(find package/ -path "*quickstart*" -name "Makefile" 2>/dev/null); do
+            echo "🔧 处理: $file"
+            cp "$file" "$file.bak"
+            sed -i -E 's/\+shadow[a-z0-9-]*\b//g' "$file"
+            sed -i -E 's/\+smartmontools[a-z0-9-]*\b//g' "$file"
+            sed -i -E 's/\+smartd\b//g' "$file"
+            sed -i -E 's/\+mdadm\b//g' "$file"
+          done
+          echo "✅ quickstart 依赖清理完成"
+
+      # ============================================================
+      # 复制自定义配置文件
+      # ============================================================
+      - name: 复制自定义配置文件
+        run: |
+          cp -f feeds.conf.default diy.sh seed.config mt7981-ax3000-slim.config \
+            ImmortalWrt/ 2>/dev/null || true
+
+      - name: 运行 diy.sh
+        working-directory: ImmortalWrt
+        run: |
+          if [ -f diy.sh ]; then
+            chmod +x diy.sh
+            ./diy.sh
+          else
+            echo "⚠️ 未找到 diy.sh，跳过"
+          fi
+
+      - name: 更新并下载 feeds
+        working-directory: ImmortalWrt
+        run: ./scripts/feeds update -a && ./scripts/feeds install -a
+
+      # ============================================================
+      # 🔧 修复 iproute2/tc-tiny 编译错误（htobe64 缺失）
+      # ============================================================
+      - name: 修复 iproute2 编译错误
+        working-directory: ImmortalWrt
+        run: |
+          echo "==== 修复 iproute2 编译错误 ===="
+          IPROUTE_DIR="package/network/utils/iproute2"
+          if [ -d "$IPROUTE_DIR" ]; then
+            mkdir -p "$IPROUTE_DIR/patches"
+            cat > "$IPROUTE_DIR/patches/012-libnetlink-fix-build-with-musl-and-gcc-14.patch" << 'EOF'
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Thu, 8 Aug 2024 09:19:01 +0200
+Subject: libnetlink: fix build with musl and gcc 14
+
+Fixes compilation error with musl libc and gcc 14:
+
+../include/libnetlink.h: In function 'rta_getattr_be64':
+../include/libnetlink.h:280:16: error: implicit declaration of function 'htobe64' [-Wimplicit-function-declaration]
+  280 |         return htobe64(rta_getattr_u64(rta));
+      |                ^~~~~~~
+
+Reference: https://man7.org/linux/man-pages/man3/endian.3.html
+
+Signed-off-by: Natanael Copa <ncopa@alpinelinux.org>
+---
+ include/libnetlink.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+--- a/include/libnetlink.h
++++ b/include/libnetlink.h
+@@ -2,6 +2,7 @@
+ #ifndef __LIBNETLINK_H__
+ #define __LIBNETLINK_H__ 1
+ 
++#include <endian.h>
+ #include <stdio.h>
+ #include <string.h>
+ #include <asm/types.h>
+EOF
+            echo "✅ iproute2 补丁已创建"
+          else
+            echo "⚠️ 未找到 iproute2 目录，跳过"
+          fi
+
+      # ============================================================
+      # 🔧 修复 libxcrypt 编译错误（必须在 feeds install 之后）
+      # ============================================================
+      - name: 修复 libxcrypt Makefile
+        working-directory: ImmortalWrt
+        run: |
+          LIBMK=$(find package/feeds -path "*libxcrypt*/Makefile" 2>/dev/null | head -1 || true)
+          if [ -n "$LIBMK" ]; then
+            echo "🔧 修复: $LIBMK"
+            if ! grep -q "format-nonliteral" "$LIBMK"; then
+              sed -i '/^define Package\/libxcrypt\/install/i TARGET_CFLAGS += -Wno-error=format-nonliteral' "$LIBMK"
+              echo "✅ 已添加 TARGET_CFLAGS"
+            else
+              echo "⏭️ 已存在，跳过"
+            fi
+          else
+            echo "⚠️ 未找到 libxcrypt Makefile"
+          fi
+
+      # ============================================================
+      # 清理 default-settings 中的不必要依赖
+      # ============================================================
+      - name: 清理 default-settings 中的不必要依赖
+        working-directory: ImmortalWrt
+        run: |
+          echo "==== 查找 default-settings 相关文件 ===="
+          find package/ -path "*default-settings*" -name "Makefile" 2>/dev/null || true
+          find package/ -path "*default-settings*" -name "*.mk" 2>/dev/null || true
+
+          for file in $(find package/ -path "*default-settings*" \
+            \( -name "Makefile" -o -name "*.mk" \) 2>/dev/null); do
+            echo "🔧 处理: $file"
+            sed -i -E 's/\+shadow[a-z0-9-]*\b//g' "$file"
+            sed -i -E 's/\+mdadm\b//g' "$file"
+            sed -i -E 's/\+smartmontools[a-z0-9-]*\b//g' "$file"
+            sed -i -E 's/\+smartd\b//g' "$file"
+            echo "  ✅ 已处理"
+          done
+          echo "✅ default-settings 依赖清理完成"
+
+      # ============================================================
+      # 加载公用配置 + 动态禁用非目标设备
+      # ============================================================
+      - name: 加载设备配置
+        working-directory: ImmortalWrt
+        run: |
+          # ---------- 1. 确定目标设备 ID ----------
+          case "${{ env.DEVICE }}-${{ env.LAYOUT }}" in
+            WR30U-stock)   TARGET_DEVICE="xiaomi_mi-router-wr30u-stock" ;;
+            WR30U-112m)    TARGET_DEVICE="xiaomi_mi-router-wr30u-ubootmod" ;;
+            AX3000T-stock) TARGET_DEVICE="xiaomi_mi-router-ax3000t" ;;
+            AX3000T-112m)  TARGET_DEVICE="xiaomi_mi-router-ax3000t-mtkuboot" ;;
+            *)
+              echo "❌ 未知组合: ${{ env.DEVICE }}-${{ env.LAYOUT }}"
+              exit 1
+              ;;
+          esac
+
+          echo "📦 目标设备: $TARGET_DEVICE"
+          echo "📦 设备: ${{ env.DEVICE }}  布局: ${{ env.LAYOUT }}"
+
+          # ---------- 2. 复制精简配置 ----------
+          if [ ! -f "../mt7981-ax3000-slim.config" ]; then
+            echo "❌ 配置文件 ../mt7981-ax3000-slim.config 不存在！"
+            ls -la ../
+            exit 1
+          fi
+          cp "../mt7981-ax3000-slim.config" .config
+
+          # ---------- 3. 禁用非目标设备 ----------
+          ALL_DEVICES="xiaomi_mi-router-wr30u-stock \
+                       xiaomi_mi-router-wr30u-ubootmod \
+                       xiaomi_mi-router-ax3000t \
+                       xiaomi_mi-router-ax3000t-mtkuboot \
+                       xiaomi_mi-router-ax3000t-ubootmod"
+
+          for dev in $ALL_DEVICES; do
+            if [ "$dev" != "$TARGET_DEVICE" ]; then
+              sed -i "s/^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${dev}=y/# CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${dev} is not set/" .config
+              sed -i "s/^CONFIG_TARGET_DEVICE_PACKAGES_mediatek_filogic_DEVICE_${dev}=/# CONFIG_TARGET_DEVICE_PACKAGES_mediatek_filogic_DEVICE_${dev} is not set #/" .config
+              echo "  ❌ 禁用: $dev"
+            else
+              echo "  ✅ 保留: $dev"
+            fi
+          done
+
+          # ---------- 4. 合并 seed.config ----------
+          if [ -f "../seed.config" ]; then
+            grep '^CONFIG_PACKAGE_' ../seed.config >> .config 2>/dev/null || true
+          fi
+
+          # ---------- 5. 批量禁用 shadow / smartd / smartmontools / mdadm ----------
+          for pkg in shadow shadow-common shadow-utils shadow-chage shadow-chfn shadow-chgpasswd \
+                     shadow-chpasswd shadow-chsh shadow-expiry shadow-faillog shadow-gpasswd \
+                     shadow-groupadd shadow-groupdel shadow-groupmems shadow-groupmod shadow-groups \
+                     shadow-grpck shadow-grpconv shadow-grpunconv shadow-lastlog shadow-login \
+                     shadow-logoutd shadow-newgidmap shadow-newgrp shadow-newuidmap shadow-newusers \
+                     shadow-nologin shadow-passwd shadow-pwck shadow-pwconv shadow-pwunconv \
+                     shadow-su shadow-useradd shadow-userdel shadow-usermod shadow-vipw \
+                     smartd smartmontools smartmontools-drivedb mdadm; do
+            sed -i "/CONFIG_PACKAGE_${pkg}=/d" .config
+            echo "# CONFIG_PACKAGE_${pkg} is not set" >> .config
+          done
+
+          sed -i '/CONFIG_SHADOW_PASSWORDS/d' .config
+          echo "# CONFIG_SHADOW_PASSWORDS is not set" >> .config
+
+          sed -i '/CONFIG_LUCI_LANG_zh_Hans/d' .config
+          echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+
+          # ---------- 6. 用 oldconfig 补全 ----------
+          echo "==== 运行 make oldconfig ===="
+          make oldconfig < /dev/null
+
+          # ---------- 7. 诊断 + 校验 ----------
+          echo "==== subtarget 定义 ===="
+          grep "^CONFIG_TARGET_mediatek" .config || echo "(无)"
+
+          echo "==== 选中的设备 ===="
+          grep "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y" .config || true
+
+          SELECTED=$(grep -c "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y" .config || true)
+          SELECTED=${SELECTED:-0}
+          echo "==== 选中的设备数: $SELECTED ===="
+
+          if [ "$SELECTED" -ne 1 ]; then
+            echo "❌ 错误：选中的设备数不为 1，实际为 $SELECTED"
+            echo "==== 诊断：所有 DEVICE 行 ===="
+            grep "^CONFIG_TARGET_DEVICE_mediatek" .config || true
+            exit 1
+          fi
+
+          if ! grep -q "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${TARGET_DEVICE}=y" .config; then
+            echo "❌ 错误：目标设备 $TARGET_DEVICE 未被选中！"
+            grep "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE" .config | grep "=y" || true
+            exit 1
+          fi
+
+          echo "==== shadow 等包禁用情况 ===="
+          if grep -q "^CONFIG_PACKAGE_shadow.*=y" .config || \
+             grep -q "^CONFIG_PACKAGE_smartd.*=y" .config || \
+             grep -q "^CONFIG_PACKAGE_mdadm.*=y" .config; then
+            echo "❌ 警告：仍有 shadow、smartd 或 mdadm 被选中！"
+          else
+            echo "✅ 所有 shadow、smartd、smartmontools、mdadm 已成功禁用"
+          fi
+
+          echo "✅ 配置已加载：${{ env.DEVICE }}-${{ env.LAYOUT }}（$TARGET_DEVICE）"
+
+      - name: 编译前上传配置
+        uses: actions/upload-artifact@v6
+        with:
+          name: config-before-build
+          path: |
+            ImmortalWrt/feeds.conf.default
+            ImmortalWrt/.config
+
+      - name: 多线程编译
+        if: ${{ inputs.multithreading == true }}
+        working-directory: ImmortalWrt
+        run: make -j$(nproc) V=s
+
+      - name: 单线程编译
+        if: ${{ inputs.multithreading == false }}
+        working-directory: ImmortalWrt
+        run: make -j1 V=s
+
+      - name: 编译后版本校验并提取版本信息
+        id: extract-version
+        working-directory: ImmortalWrt
+        run: |
+          echo "==== git describe ===="
+          FW_TAG=$(git describe --tags 2>/dev/null || echo "unknown")
+          echo "FW_TAG=$FW_TAG"
+          FW_VERSION=${FW_TAG#v}
+          echo "FW_VERSION=$FW_VERSION" >> $GITHUB_ENV
+          echo "fw_version=$FW_VERSION" >> $GITHUB_OUTPUT
+          echo "✅ 提取版本号: $FW_VERSION"
+
+          echo "==== profiles.json version ===="
+          cat bin/targets/*/*/profiles.json 2>/dev/null | grep version_number || echo "profiles.json 未找到"
+          echo "==== openwrt_release ===="
+          cat package/base-files/files/etc/openwrt_release 2>/dev/null || echo "openwrt_release 未找到"
+
+      - name: 上传编译结果
+        uses: actions/upload-artifact@v6
+        with:
+          name: ImmortalWrt_${{ env.FW_VERSION }}_${{ env.DEVICE }}_${{ env.LAYOUT }}
+          path: ImmortalWrt/bin/targets
+
+  # ============================================================
+  # 📦 调用独立发布工作流
+  # ============================================================
+  release:
+    name: 📦 发布固件
+    needs: build
+    if: ${{ needs.build.result == 'success' }}
+    uses: ./.github/workflows/release.yml
+    with:
+      device: ${{ github.event.inputs.device || 'WR30U' }}
+      layout: ${{ github.event.inputs.layout || '112m' }}
+      fw_version: ${{ needs.build.outputs.fw_version }}
+      run_number: ${{ github.run_number }}
+
+  # ============================================================
+  # SSH 调试作业
+  # ============================================================
+  build-ssh:
+    if: ${{ inputs.ssh == true }}
+    name: 🚀 编译 (Build) - SSH
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 下载编译所需的依赖
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential ccache ecj fastjar file g++ gawk gettext git \
+            libelf-dev libncurses5-dev libncursesw5-dev libssl-dev python3 python3-distutils \
+            python3-setuptools python3-pyelftools rsync subversion swig time u-boot-tools \
+            unzip wget xsltproc zlib1g-dev
+
+      - name: 克隆当前仓库
+        uses: actions/checkout@v5
+
+      - name: 克隆闭源 ImmortalWrt 仓库
+        uses: actions/checkout@v5
+        with:
+          repository: 'padavanonly/immortalwrt-mt798x-24.10'
+          ref: 'openwrt-24.10-6.6'
+          path: ImmortalWrt
+          fetch-depth: 0
+
+      - name: 校验 git 版本标签
+        working-directory: ImmortalWrt
+        run: |
+          git describe --tags 2>/dev/null || true
+          git log -1 --oneline
+
+      - name: 手动克隆 UA3F 源码
+        working-directory: ImmortalWrt
+        run: |
+          git clone https://github.com/SunBK201/UA3F.git package/UA3F
+
+      - name: 克隆 OpenAppFilter (OAF) 源码
+        working-directory: ImmortalWrt
+        run: |
+          git clone https://github.com/destan19/OpenAppFilter.git package/OpenAppFilter
+
+      - name: 从 kenzok8 源拉取 quickstart 及其全部依赖
+        working-directory: ImmortalWrt
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/kenzok8/openwrt-packages.git temp_kenzok8
+          cd temp_kenzok8
+          git sparse-checkout set quickstart luci-app-quickstart luci-app-store \
+            luci-lib-taskd luci-lib-xterm taskd
+          cd ..
+          mv temp_kenzok8/quickstart package/
+          mv temp_kenzok8/luci-app-quickstart package/
+          mv temp_kenzok8/luci-app-store package/
+          mv temp_kenzok8/luci-lib-taskd package/
+          mv temp_kenzok8/luci-lib-xterm package/
+          mv temp_kenzok8/taskd package/
+          rm -rf temp_kenzok8
+          echo "✅ quickstart 全部依赖链已拉取"
+
+      - name: 修改 quickstart Makefile 移除不必要依赖
+        working-directory: ImmortalWrt
+        run: |
+          for file in $(find package/ -path "*quickstart*" -name "Makefile" 2>/dev/null); do
+            echo "🔧 处理: $file"
+            cp "$file" "$file.bak"
+            sed -i -E 's/\+shadow[a-z0-9-]*\b//g' "$file"
+            sed -i -E 's/\+smartmontools[a-z0-9-]*\b//g' "$file"
+            sed -i -E 's/\+smartd\b//g' "$file"
+            sed -i -E 's/\+mdadm\b//g' "$file"
+          done
+          echo "✅ quickstart 依赖清理完成"
+
+      - name: 复制自定义配置文件
+        run: |
+          cp -f feeds.conf.default diy.sh seed.config mt7981-ax3000-slim.config \
+            ImmortalWrt/ 2>/dev/null || true
+
+      - name: 运行 diy.sh
+        working-directory: ImmortalWrt
+        run: |
+          if [ -f diy.sh ]; then
+            chmod +x diy.sh
+            ./diy.sh
+          else
+            echo "⚠️ 未找到 diy.sh，跳过"
+          fi
+
+      - name: 更新并下载 feeds
+        working-directory: ImmortalWrt
+        run: ./scripts/feeds update -a && ./scripts/feeds install -a
+
+      # ============================================================
+      # 🔧 修复 iproute2/tc-tiny 编译错误（htobe64 缺失）
+      # ============================================================
+      - name: 修复 iproute2 编译错误
+        working-directory: ImmortalWrt
+        run: |
+          echo "==== 修复 iproute2 编译错误 ===="
+          IPROUTE_DIR="package/network/utils/iproute2"
+          if [ -d "$IPROUTE_DIR" ]; then
+            mkdir -p "$IPROUTE_DIR/patches"
+            cat > "$IPROUTE_DIR/patches/012-libnetlink-fix-build-with-musl-and-gcc-14.patch" << 'EOF'
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Thu, 8 Aug 2024 09:19:01 +0200
+Subject: libnetlink: fix build with musl and gcc 14
+
+Fixes compilation error with musl libc and gcc 14:
+
+../include/libnetlink.h: In function 'rta_getattr_be64':
+../include/libnetlink.h:280:16: error: implicit declaration of function 'htobe64' [-Wimplicit-function-declaration]
+  280 |         return htobe64(rta_getattr_u64(rta));
+      |                ^~~~~~~
+
+Reference: https://man7.org/linux/man-pages/man3/endian.3.html
+
+Signed-off-by: Natanael Copa <ncopa@alpinelinux.org>
+---
+ include/libnetlink.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+--- a/include/libnetlink.h
++++ b/include/libnetlink.h
+@@ -2,6 +2,7 @@
+ #ifndef __LIBNETLINK_H__
+ #define __LIBNETLINK_H__ 1
+ 
++#include <endian.h>
+ #include <stdio.h>
+ #include <string.h>
+ #include <asm/types.h>
+EOF
+            echo "✅ iproute2 补丁已创建"
+          else
+            echo "⚠️ 未找到 iproute2 目录，跳过"
+          fi
+
+      - name: 修复 libxcrypt Makefile
+        working-directory: ImmortalWrt
+        run: |
+          LIBMK=$(find package/feeds -path "*libxcrypt*/Makefile" 2>/dev/null | head -1 || true)
+          if [ -n "$LIBMK" ]; then
+            echo "🔧 修复: $LIBMK"
+            if ! grep -q "format-nonliteral" "$LIBMK"; then
+              sed -i '/^define Package\/libxcrypt\/install/i TARGET_CFLAGS += -Wno-error=format-nonliteral' "$LIBMK"
+              echo "✅ 已添加 TARGET_CFLAGS"
+            fi
+          fi
+
+      - name: 清理 default-settings 中的不必要依赖
+        working-directory: ImmortalWrt
+        run: |
+          for file in $(find package/ -path "*default-settings*" \
+            \( -name "Makefile" -o -name "*.mk" \) 2>/dev/null); do
+            echo "🔧 处理: $file"
+            sed -i -E 's/\+shadow[a-z0-9-]*\b//g' "$file"
+            sed -i -E 's/\+mdadm\b//g' "$file"
+            sed -i -E 's/\+smartmontools[a-z0-9-]*\b//g' "$file"
+            sed -i -E 's/\+smartd\b//g' "$file"
+          done
+          echo "✅ default-settings 依赖清理完成"
+
+      - name: 加载设备配置
+        working-directory: ImmortalWrt
+        run: |
+          case "${{ env.DEVICE }}-${{ env.LAYOUT }}" in
+            WR30U-stock)   TARGET_DEVICE="xiaomi_mi-router-wr30u-stock" ;;
+            WR30U-112m)    TARGET_DEVICE="xiaomi_mi-router-wr30u-ubootmod" ;;
+            AX3000T-stock) TARGET_DEVICE="xiaomi_mi-router-ax3000t" ;;
+            AX3000T-112m)  TARGET_DEVICE="xiaomi_mi-router-ax3000t-mtkuboot" ;;
+            *)
+              echo "❌ 未知组合: ${{ env.DEVICE }}-${{ env.LAYOUT }}"
+              exit 1
+              ;;
+          esac
+
+          echo "📦 目标设备: $TARGET_DEVICE"
+
+          cp "../mt7981-ax3000-slim.config" .config
+
+          ALL_DEVICES="xiaomi_mi-router-wr30u-stock \
+                       xiaomi_mi-router-wr30u-ubootmod \
+                       xiaomi_mi-router-ax3000t \
+                       xiaomi_mi-router-ax3000t-mtkuboot \
+                       xiaomi_mi-router-ax3000t-ubootmod"
+
+          for dev in $ALL_DEVICES; do
+            if [ "$dev" != "$TARGET_DEVICE" ]; then
+              sed -i "s/^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${dev}=y/# CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${dev} is not set/" .config
+              sed -i "s/^CONFIG_TARGET_DEVICE_PACKAGES_mediatek_filogic_DEVICE_${dev}=/# CONFIG_TARGET_DEVICE_PACKAGES_mediatek_filogic_DEVICE_${dev} is not set #/" .config
+            fi
+          done
+
+          if [ -f "../seed.config" ]; then
+            grep '^CONFIG_PACKAGE_' ../seed.config >> .config 2>/dev/null || true
+          fi
+
+          for pkg in shadow shadow-common shadow-utils shadow-chage shadow-chfn shadow-chgpasswd \
+                     shadow-chpasswd shadow-chsh shadow-expiry shadow-faillog shadow-gpasswd \
+                     shadow-groupadd shadow-groupdel shadow-groupmems shadow-groupmod shadow-groups \
+                     shadow-grpck shadow-grpconv shadow-grpunconv shadow-lastlog shadow-login \
+                     shadow-logoutd shadow-newgidmap shadow-newgrp shadow-newuidmap shadow-newusers \
+                     shadow-nologin shadow-passwd shadow-pwck shadow-pwconv shadow-pwunconv \
+                     shadow-su shadow-useradd shadow-userdel shadow-usermod shadow-vipw \
+                     smartd smartmontools smartmontools-drivedb mdadm; do
+            sed -i "/CONFIG_PACKAGE_${pkg}=/d" .config
+            echo "# CONFIG_PACKAGE_${pkg} is not set" >> .config
+          done
+
+          sed -i '/CONFIG_SHADOW_PASSWORDS/d' .config
+          echo "# CONFIG_SHADOW_PASSWORDS is not set" >> .config
+
+          sed -i '/CONFIG_LUCI_LANG_zh_Hans/d' .config
+          echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+
+          make oldconfig < /dev/null
+
+          SELECTED=$(grep -c "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y" .config || true)
+          SELECTED=${SELECTED:-0}
+
+          echo "==== 选中的设备数: $SELECTED ===="
+          grep "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y" .config || true
+
+          if [ "$SELECTED" -ne 1 ]; then
+            echo "❌ 错误：选中的设备数不为 1，实际为 $SELECTED"
+            exit 1
+          fi
+
+          if ! grep -q "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${TARGET_DEVICE}=y" .config; then
+            echo "❌ 错误：目标设备 $TARGET_DEVICE 未被选中！"
+            exit 1
+          fi
+
+          echo "✅ 配置已加载：${{ env.DEVICE }}-${{ env.LAYOUT }}（$TARGET_DEVICE）"
+
+      - name: 开启 SSH 服务
+        uses: lhotari/action-upterm@v1
+        with:
+          wait-timeout-minutes: 20
+
+      - name: 编译前上传配置
+        uses: actions/upload-artifact@v6
+        with:
+          name: config-before-build
+          path: |
+            ImmortalWrt/feeds.conf.default
+            ImmortalWrt/.config
+
+      - name: 多线程编译
+        if: ${{ inputs.multithreading == true }}
+        working-directory: ImmortalWrt
+        run: make -j$(nproc) V=s
+
+      - name: 单线程编译
+        if: ${{ inputs.multithreading == false }}
+        working-directory: ImmortalWrt
+        run: make -j1 V=s
+
+      - name: 编译后版本校验并提取版本信息
+        id: extract-version-ssh
+        working-directory: ImmortalWrt
+        run: |
+          echo "==== git describe ===="
+          FW_TAG=$(git describe --tags 2>/dev/null || echo "unknown")
+          echo "FW_TAG=$FW_TAG"
+          FW_VERSION=${FW_TAG#v}
+          echo "FW_VERSION=$FW_VERSION" >> $GITHUB_ENV
+          echo "fw_version=$FW_VERSION" >> $GITHUB_OUTPUT
+          echo "✅ 提取版本号: $FW_VERSION"
+
+          echo "==== profiles.json version ===="
+          cat bin/targets/*/*/profiles.json 2>/dev/null | grep version_number || echo "profiles.json 未找到"
+          echo "==== openwrt_release ===="
+          cat package/base-files/files/etc/openwrt_release 2>/dev/null || echo "openwrt_release 未找到"
+
+      - name: 上传编译结果
+        uses: actions/upload-artifact@v6
+        with:
+          name: ImmortalWrt_${{ env.FW_VERSION }}_${{ env.DEVICE }}_${{ env.LAYOUT }}
+          path: ImmortalWrt/bin/targets
