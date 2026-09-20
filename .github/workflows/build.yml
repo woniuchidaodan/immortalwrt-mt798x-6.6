@@ -144,19 +144,34 @@ jobs:
 
       # ============================================================
       # 🔧 修复 iproute2/tc-tiny 编译错误（htobe64 缺失）
+      # 说明：头文件 libnetlink.h 在 package 目录里不存在，
+      #       必须写成补丁放到 patches/ 目录，让构建时自动应用。
       # ============================================================
       - name: 修复 iproute2 编译错误
         working-directory: ImmortalWrt
         run: |
           echo "==== 修复 iproute2 编译错误 ===="
           IPROUTE_DIR="package/network/utils/iproute2"
-          if [ -d "$IPROUTE_DIR" ]; then
-            # 直接在头文件里插入缺少的 #include <endian.h>
-            sed -i '/#include <asm\/types.h>/i #include <endian.h>' "$IPROUTE_DIR/include/libnetlink.h"
-            echo "✅ 已修复 iproute2/libnetlink.h"
-          else
-            echo "⚠️ 未找到 iproute2 目录，跳过"
+          if [ ! -d "$IPROUTE_DIR" ]; then
+            echo "⚠️ 未找到 $IPROUTE_DIR，跳过"
+            exit 0
           fi
+          mkdir -p "$IPROUTE_DIR/patches"
+          PATCH="$IPROUTE_DIR/patches/012-libnetlink-fix-build-with-musl-and-gcc-14.patch"
+          {
+            echo '--- a/include/libnetlink.h'
+            echo '+++ b/include/libnetlink.h'
+            echo '@@ -1,5 +1,6 @@'
+            echo ' #ifndef __LIBNETLINK_H__'
+            echo ' #define __LIBNETLINK_H__ 1'
+            echo ' '
+            echo '+#include <endian.h>'
+            echo ' #include <stdio.h>'
+            echo ' #include <string.h>'
+          } > "$PATCH"
+          echo "✅ 已创建补丁: $PATCH"
+          echo "==== 补丁内容 ===="
+          cat "$PATCH"
 
       # ============================================================
       # 🔧 修复 libxcrypt 编译错误（必须在 feeds install 之后）
@@ -463,12 +478,26 @@ jobs:
         run: |
           echo "==== 修复 iproute2 编译错误 ===="
           IPROUTE_DIR="package/network/utils/iproute2"
-          if [ -d "$IPROUTE_DIR" ]; then
-            sed -i '/#include <asm\/types.h>/i #include <endian.h>' "$IPROUTE_DIR/include/libnetlink.h"
-            echo "✅ 已修复 iproute2/libnetlink.h"
-          else
-            echo "⚠️ 未找到 iproute2 目录，跳过"
+          if [ ! -d "$IPROUTE_DIR" ]; then
+            echo "⚠️ 未找到 $IPROUTE_DIR，跳过"
+            exit 0
           fi
+          mkdir -p "$IPROUTE_DIR/patches"
+          PATCH="$IPROUTE_DIR/patches/012-libnetlink-fix-build-with-musl-and-gcc-14.patch"
+          {
+            echo '--- a/include/libnetlink.h'
+            echo '+++ b/include/libnetlink.h'
+            echo '@@ -1,5 +1,6 @@'
+            echo ' #ifndef __LIBNETLINK_H__'
+            echo ' #define __LIBNETLINK_H__ 1'
+            echo ' '
+            echo '+#include <endian.h>'
+            echo ' #include <stdio.h>'
+            echo ' #include <string.h>'
+          } > "$PATCH"
+          echo "✅ 已创建补丁: $PATCH"
+          echo "==== 补丁内容 ===="
+          cat "$PATCH"
 
       - name: 修复 libxcrypt Makefile
         working-directory: ImmortalWrt
