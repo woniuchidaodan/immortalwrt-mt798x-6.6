@@ -143,6 +143,52 @@ jobs:
         run: ./scripts/feeds update -a && ./scripts/feeds install -a
 
       # ============================================================
+      # 🔧 修复 iproute2/tc-tiny 编译错误（htobe64 缺失）
+      # ============================================================
+      - name: 修复 iproute2 编译错误
+        working-directory: ImmortalWrt
+        run: |
+          echo "==== 修复 iproute2 编译错误 ===="
+          IPROUTE_DIR="package/network/utils/iproute2"
+          if [ -d "$IPROUTE_DIR" ]; then
+            mkdir -p "$IPROUTE_DIR/patches"
+            cat > "$IPROUTE_DIR/patches/012-libnetlink-fix-build-with-musl-and-gcc-14.patch" << 'EOF'
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Thu, 8 Aug 2024 09:19:01 +0200
+Subject: libnetlink: fix build with musl and gcc 14
+
+Fixes compilation error with musl libc and gcc 14:
+
+../include/libnetlink.h: In function 'rta_getattr_be64':
+../include/libnetlink.h:280:16: error: implicit declaration of function 'htobe64' [-Wimplicit-function-declaration]
+  280 |         return htobe64(rta_getattr_u64(rta));
+      |                ^~~~~~~
+
+Reference: https://man7.org/linux/man-pages/man3/endian.3.html
+
+Signed-off-by: Natanael Copa <ncopa@alpinelinux.org>
+---
+ include/libnetlink.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+--- a/include/libnetlink.h
++++ b/include/libnetlink.h
+@@ -2,6 +2,7 @@
+ #ifndef __LIBNETLINK_H__
+ #define __LIBNETLINK_H__ 1
+ 
++#include <endian.h>
+ #include <stdio.h>
+ #include <string.h>
+ #include <asm/types.h>
+EOF
+            echo "✅ iproute2 补丁已创建"
+          else
+            echo "⚠️ 未找到 iproute2 目录，跳过"
+          fi
+
+      # ============================================================
       # 🔧 修复 libxcrypt 编译错误（必须在 feeds install 之后）
       # ============================================================
       - name: 修复 libxcrypt Makefile
@@ -212,7 +258,6 @@ jobs:
           cp "../mt7981-ax3000-slim.config" .config
 
           # ---------- 3. 禁用非目标设备 ----------
-          # 注意：AX3000T 有 3 个变体（stock / mtkuboot / ubootmod），都要一起处理
           ALL_DEVICES="xiaomi_mi-router-wr30u-stock \
                        xiaomi_mi-router-wr30u-ubootmod \
                        xiaomi_mi-router-ax3000t \
@@ -253,7 +298,7 @@ jobs:
           sed -i '/CONFIG_LUCI_LANG_zh_Hans/d' .config
           echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
 
-          # ---------- 6. 用 oldconfig 补全（不用 defconfig，避免重新评估覆盖）----------
+          # ---------- 6. 用 oldconfig 补全 ----------
           echo "==== 运行 make oldconfig ===="
           make oldconfig < /dev/null
 
@@ -377,11 +422,7 @@ jobs:
       - name: 校验 git 版本标签
         working-directory: ImmortalWrt
         run: |
-          echo "==== git describe ===="
           git describe --tags 2>/dev/null || true
-          echo "==== git status ===="
-          git status
-          echo "==== 当前 commit ===="
           git log -1 --oneline
 
       - name: 手动克隆 UA3F 源码
@@ -443,6 +484,52 @@ jobs:
       - name: 更新并下载 feeds
         working-directory: ImmortalWrt
         run: ./scripts/feeds update -a && ./scripts/feeds install -a
+
+      # ============================================================
+      # 🔧 修复 iproute2/tc-tiny 编译错误（htobe64 缺失）
+      # ============================================================
+      - name: 修复 iproute2 编译错误
+        working-directory: ImmortalWrt
+        run: |
+          echo "==== 修复 iproute2 编译错误 ===="
+          IPROUTE_DIR="package/network/utils/iproute2"
+          if [ -d "$IPROUTE_DIR" ]; then
+            mkdir -p "$IPROUTE_DIR/patches"
+            cat > "$IPROUTE_DIR/patches/012-libnetlink-fix-build-with-musl-and-gcc-14.patch" << 'EOF'
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Natanael Copa <ncopa@alpinelinux.org>
+Date: Thu, 8 Aug 2024 09:19:01 +0200
+Subject: libnetlink: fix build with musl and gcc 14
+
+Fixes compilation error with musl libc and gcc 14:
+
+../include/libnetlink.h: In function 'rta_getattr_be64':
+../include/libnetlink.h:280:16: error: implicit declaration of function 'htobe64' [-Wimplicit-function-declaration]
+  280 |         return htobe64(rta_getattr_u64(rta));
+      |                ^~~~~~~
+
+Reference: https://man7.org/linux/man-pages/man3/endian.3.html
+
+Signed-off-by: Natanael Copa <ncopa@alpinelinux.org>
+---
+ include/libnetlink.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+--- a/include/libnetlink.h
++++ b/include/libnetlink.h
+@@ -2,6 +2,7 @@
+ #ifndef __LIBNETLINK_H__
+ #define __LIBNETLINK_H__ 1
+ 
++#include <endian.h>
+ #include <stdio.h>
+ #include <string.h>
+ #include <asm/types.h>
+EOF
+            echo "✅ iproute2 补丁已创建"
+          else
+            echo "⚠️ 未找到 iproute2 目录，跳过"
+          fi
 
       - name: 修复 libxcrypt Makefile
         working-directory: ImmortalWrt
