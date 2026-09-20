@@ -1,0 +1,71 @@
+name: 📦 发布固件
+
+on:
+  workflow_call:
+    inputs:
+      device:
+        required: true
+        type: string
+      layout:
+        required: true
+        type: string
+      fw_version:
+        required: true
+        type: string
+      run_number:
+        required: true
+        type: string
+
+permissions: write-all
+
+jobs:
+  release:
+    name: 📦 发布固件
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 下载编译产物
+        uses: actions/download-artifact@v5
+        with:
+          name: ImmortalWrt_${{ inputs.fw_version }}_${{ inputs.device }}_${{ inputs.layout }}
+          path: artifacts
+
+      - name: 整理文件结构
+        run: |
+          echo "==== 下载的文件 ===="
+          find artifacts -type f | head -50
+          echo ""
+          mkdir -p release
+          find artifacts -type f \( -name "*.bin" -o -name "*.itb" -o -name "*.ubi" \
+            -o -name "*.img.gz" -o -name "*.tar.gz" -o -name "sha256sums" \) \
+            -exec cp {} release/ \;
+          echo "==== 发布目录 ===="
+          ls -la release/
+
+      - name: 生成 Release 标签
+        id: tag
+        run: |
+          TAG="v${{ inputs.fw_version }}-${{ inputs.device }}-${{ inputs.layout }}-r${{ inputs.run_number }}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "📦 Tag: $TAG"
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ImmortalWrt ${{ inputs.fw_version }} · ${{ inputs.device }} · ${{ inputs.layout }} · #${{ inputs.run_number }}
+          body: |
+            ## 📦 ImmortalWrt MT798x 闭源固件
+
+            - **设备**: ${{ inputs.device }}
+            - **布局**: ${{ inputs.layout }}
+            - **版本**: ${{ inputs.fw_version }}
+            - **构建号**: #${{ inputs.run_number }}
+
+            ### 🔧 刷机说明
+            - 使用 H大 uboot WebUI（`192.168.31.1`）刷入
+            - 布局对应：`stock` → `default`；`112m` → `immortalwrt-112m`
+            - 先切换布局，再上传固件
+          files: release/*
+          draft: false
+          prerelease: false
+          generate_release_notes: false
