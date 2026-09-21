@@ -40,10 +40,25 @@ jobs:
     outputs:
       fw_version: ${{ steps.extract-version.outputs.fw_version }}
     steps:
+      # ============================================================
+      # 彻底释放磁盘空间
+      # ============================================================
       - name: 释放磁盘空间
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          echo "==== 清理前 ===="
+          df -h
+          echo ""
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/lib/node_modules || true
+          sudo rm -rf /opt/microsoft || true
+          sudo rm -rf /usr/share/swift || true
+          sudo apt-get clean
+          echo ""
+          echo "==== 清理后 ===="
           df -h
 
       - name: 下载编译所需的依赖
@@ -58,8 +73,7 @@ jobs:
         uses: actions/checkout@v5
 
       # ============================================================
-      # 闭源仓库：padavanonly/immortalwrt-mt798x-24.10
-      # 分支：openwrt-24.10-6.6
+      # 克隆闭源仓库：padavanonly/immortalwrt-mt798x-24.10
       # ============================================================
       - name: 克隆闭源 ImmortalWrt 仓库
         uses: actions/checkout@v5
@@ -72,11 +86,7 @@ jobs:
       - name: 校验 git 版本标签
         working-directory: ImmortalWrt
         run: |
-          echo "==== git describe ===="
           git describe --tags 2>/dev/null || true
-          echo "==== git status ===="
-          git status
-          echo "==== 当前 commit ===="
           git log -1 --oneline
 
       # ============================================================
@@ -93,7 +103,7 @@ jobs:
           git clone https://github.com/destan19/OpenAppFilter.git package/OpenAppFilter
 
       # ============================================================
-      # quickstart 全家桶（从 kenzok8 源）
+      # quickstart 全家桶
       # ============================================================
       - name: 从 kenzok8 源拉取 quickstart 及其全部依赖
         working-directory: ImmortalWrt
@@ -126,12 +136,9 @@ jobs:
           done
           echo "✅ quickstart 依赖清理完成"
 
-      # ============================================================
-      # 复制自定义配置文件
-      # ============================================================
       - name: 复制自定义配置文件
         run: |
-          cp -f feeds.conf.default diy.sh seed.config mt7981-ax3000-slim.config \
+          cp -f diy.sh seed.config mt7981-ax3000-slim.config \
             ImmortalWrt/ 2>/dev/null || true
 
       - name: 运行 diy.sh
@@ -149,50 +156,40 @@ jobs:
         run: ./scripts/feeds update -a && ./scripts/feeds install -a
 
       # ============================================================
-      # 🔧 替换失效的下载源（mirror2.immortalwrt.org 返回 400）
+      # 替换失效的下载源
       # ============================================================
       - name: 替换 OpenWrt 下载源
         working-directory: ImmortalWrt
         run: |
           echo "==== 替换默认下载源 ===="
-          # 把失效的 mirror2.immortalwrt.org 替换为可用的官方镜像
           find . -name "*.mk" -path "*include*" 2>/dev/null | while read f; do
             if grep -q "mirror2\.immortalwrt\.org" "$f" 2>/dev/null; then
-              echo "🔧 修复: $f"
               sed -i 's|mirror2\.immortalwrt\.org|sources.openwrt.org|g' "$f"
             fi
           done
           find . -name "*.mk" -path "*include*" 2>/dev/null | while read f; do
             if grep -q "mirror\.immortalwrt\.org" "$f" 2>/dev/null; then
-              echo "🔧 修复: $f"
               sed -i 's|mirror\.immortalwrt\.org|sources.openwrt.org|g' "$f"
             fi
           done
           echo "✅ 下载源替换完成"
 
-      # ============================================================
-      # 🔧 预下载 gnulib（防止某个镜像 400 导致 bison 编译失败）
-      # ============================================================
       - name: 预下载 gnulib
         working-directory: ImmortalWrt
         run: |
           echo "==== 预下载 gnulib ===="
           mkdir -p dl
           GNULIB_FILE="gnulib-c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz"
-
           if [ -f "dl/$GNULIB_FILE" ]; then
             echo "⏭️ 已存在，跳过"
-            ls -la "dl/$GNULIB_FILE"
             exit 0
           fi
-
           MIRRORS=(
             "https://sources.openwrt.org/$GNULIB_FILE"
             "https://sources.cdn.openwrt.org/$GNULIB_FILE"
             "https://mirror-03.infra.openwrt.org/sources/$GNULIB_FILE"
             "https://downloads.openwrt.org/sources/$GNULIB_FILE"
           )
-
           for url in "${MIRRORS[@]}"; do
             echo "尝试: $url"
             if wget -q --timeout=30 --tries=2 -O "dl/$GNULIB_FILE" "$url"; then
@@ -201,18 +198,14 @@ jobs:
                 echo "✅ 下载成功: $url ($SIZE bytes)"
                 exit 0
               else
-                echo "⚠️ 文件太小，重试下一个"
                 rm -f "dl/$GNULIB_FILE"
               fi
-            else
-              echo "❌ 失败: $url"
             fi
           done
-
-          echo "⚠️ 所有镜像都失败，继续让 OpenWrt 自己尝试"
+          echo "⚠️ 所有镜像都失败"
 
       # ============================================================
-      # 🔧 修复 iproute2/tc-tiny 编译错误（htobe64 缺失）
+      # 修复 iproute2 / mt_wifi / libxcrypt
       # ============================================================
       - name: 修复 iproute2 编译错误
         working-directory: ImmortalWrt
@@ -236,12 +229,8 @@ jobs:
             echo ' #include <stdio.h>'
             echo ' #include <string.h>'
           } > "$PATCH"
-          echo "✅ 已创建补丁: $PATCH"
-          cat "$PATCH"
+          echo "✅ 已创建补丁"
 
-      # ============================================================
-      # 🔧 修复 mt_wifi GCC 13 编译错误
-      # ============================================================
       - name: 修复 mt_wifi 编译错误
         working-directory: ImmortalWrt
         run: |
@@ -251,9 +240,6 @@ jobs:
             echo "⚠️ 未找到 $MTWIFI_MK，跳过"
             exit 0
           fi
-          echo "📄 原始 Makefile 中的 TARGET_CFLAGS:"
-          grep -n "TARGET_CFLAGS" "$MTWIFI_MK" || echo "(无)"
-
           if ! grep -q "Wno-error=implicit-function-declaration" "$MTWIFI_MK"; then
             {
               echo ''
@@ -268,42 +254,40 @@ jobs:
             } >> "$MTWIFI_MK"
             echo "✅ 已追加忽略规则"
           else
-            echo "⏭️ 已存在，跳过"
+            echo "⏭️ 已存在"
           fi
 
-          echo "📄 修改后 Makefile 中的 TARGET_CFLAGS:"
-          grep -n "TARGET_CFLAGS" "$MTWIFI_MK" || echo "(无)"
-
-      # ============================================================
-      # 🔧 修复 libxcrypt 编译错误（找不到就跳过）
-      # ============================================================
       - name: 修复 libxcrypt Makefile
         working-directory: ImmortalWrt
         run: |
-          echo "==== 搜索 libxcrypt Makefile ===="
           LIBMK=$(find package -path "*libxcrypt*/Makefile" 2>/dev/null | head -1 || true)
           if [ -n "$LIBMK" ]; then
-            echo "🔧 找到: $LIBMK"
             if ! grep -q "format-nonliteral" "$LIBMK"; then
               sed -i '/^define Package\/libxcrypt\/install/i TARGET_CFLAGS += -Wno-error=format-nonliteral' "$LIBMK"
-              echo "✅ 已添加 TARGET_CFLAGS"
-            else
-              echo "⏭️ 已存在，跳过"
+              echo "✅ 已修复 libxcrypt"
             fi
           else
-            echo "⚠️ 未找到 libxcrypt Makefile（24.10 分支可能不再需要此包）"
+            echo "⚠️ 未找到 libxcrypt（跳过）"
           fi
 
       # ============================================================
-      # 清理 default-settings 中的不必要依赖
+      # 清理 libtool 残留（关键！）
       # ============================================================
+      - name: 清理 libtool 残留
+        working-directory: ImmortalWrt
+        run: |
+          echo "==== 清理 libtool 残留 ===="
+          rm -rf build_dir/host/libtool-* || true
+          rm -rf build_dir/host/libtool || true
+          rm -rf staging_dir/host/share/aclocal/libtool.m4 || true
+          rm -rf staging_dir/host/share/aclocal/lt*.m4 || true
+          rm -rf staging_dir/host/bin/libtool* || true
+          rm -rf staging_dir/host/lib/libltdl* || true
+          echo "✅ libtool 残留已清理"
+
       - name: 清理 default-settings 中的不必要依赖
         working-directory: ImmortalWrt
         run: |
-          echo "==== 查找 default-settings 相关文件 ===="
-          find package/ -path "*default-settings*" -name "Makefile" 2>/dev/null || true
-          find package/ -path "*default-settings*" -name "*.mk" 2>/dev/null || true
-
           for file in $(find package/ -path "*default-settings*" \
             \( -name "Makefile" -o -name "*.mk" \) 2>/dev/null); do
             echo "🔧 处理: $file"
@@ -311,17 +295,15 @@ jobs:
             sed -i -E 's/\+mdadm\b//g' "$file"
             sed -i -E 's/\+smartmontools[a-z0-9-]*\b//g' "$file"
             sed -i -E 's/\+smartd\b//g' "$file"
-            echo "  ✅ 已处理"
           done
           echo "✅ default-settings 依赖清理完成"
 
       # ============================================================
-      # 加载公用配置 + 动态禁用非目标设备
+      # 加载设备配置
       # ============================================================
       - name: 加载设备配置
         working-directory: ImmortalWrt
         run: |
-          # ---------- 1. 确定目标设备 ID ----------
           case "${{ env.DEVICE }}-${{ env.LAYOUT }}" in
             WR30U-stock)   TARGET_DEVICE="xiaomi_mi-router-wr30u-stock" ;;
             WR30U-112m)    TARGET_DEVICE="xiaomi_mi-router-wr30u-ubootmod" ;;
@@ -334,17 +316,13 @@ jobs:
           esac
 
           echo "📦 目标设备: $TARGET_DEVICE"
-          echo "📦 设备: ${{ env.DEVICE }}  布局: ${{ env.LAYOUT }}"
 
-          # ---------- 2. 复制精简配置 ----------
           if [ ! -f "../mt7981-ax3000-slim.config" ]; then
             echo "❌ 配置文件 ../mt7981-ax3000-slim.config 不存在！"
-            ls -la ../
             exit 1
           fi
           cp "../mt7981-ax3000-slim.config" .config
 
-          # ---------- 3. 禁用非目标设备 ----------
           ALL_DEVICES="xiaomi_mi-router-wr30u-stock \
                        xiaomi_mi-router-wr30u-ubootmod \
                        xiaomi_mi-router-ax3000t \
@@ -361,12 +339,10 @@ jobs:
             fi
           done
 
-          # ---------- 4. 合并 seed.config ----------
           if [ -f "../seed.config" ]; then
             grep '^CONFIG_PACKAGE_' ../seed.config >> .config 2>/dev/null || true
           fi
 
-          # ---------- 5. 批量禁用 shadow / smartd / smartmontools / mdadm ----------
           for pkg in shadow shadow-common shadow-utils shadow-chage shadow-chfn shadow-chgpasswd \
                      shadow-chpasswd shadow-chsh shadow-expiry shadow-faillog shadow-gpasswd \
                      shadow-groupadd shadow-groupdel shadow-groupmems shadow-groupmod shadow-groups \
@@ -385,104 +361,97 @@ jobs:
           sed -i '/CONFIG_LUCI_LANG_zh_Hans/d' .config
           echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
 
-          # ---------- 6. 用 oldconfig 补全 ----------
-          echo "==== 运行 make oldconfig ===="
           make oldconfig < /dev/null
-
-          # ---------- 7. 诊断 + 校验 ----------
-          echo "==== subtarget 定义 ===="
-          grep "^CONFIG_TARGET_mediatek" .config || echo "(无)"
-
-          echo "==== 选中的设备 ===="
-          grep "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y" .config || true
 
           SELECTED=$(grep -c "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y" .config || true)
           SELECTED=${SELECTED:-0}
+
           echo "==== 选中的设备数: $SELECTED ===="
+          grep "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y" .config || true
 
           if [ "$SELECTED" -ne 1 ]; then
-            echo "❌ 错误：选中的设备数不为 1，实际为 $SELECTED"
-            echo "==== 诊断：所有 DEVICE 行 ===="
-            grep "^CONFIG_TARGET_DEVICE_mediatek" .config || true
+            echo "❌ 错误：选中的设备数不为 1"
             exit 1
           fi
 
           if ! grep -q "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${TARGET_DEVICE}=y" .config; then
             echo "❌ 错误：目标设备 $TARGET_DEVICE 未被选中！"
-            grep "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE" .config | grep "=y" || true
             exit 1
           fi
 
-          echo "==== shadow 等包禁用情况 ===="
-          if grep -q "^CONFIG_PACKAGE_shadow.*=y" .config || \
-             grep -q "^CONFIG_PACKAGE_smartd.*=y" .config || \
-             grep -q "^CONFIG_PACKAGE_mdadm.*=y" .config; then
-            echo "❌ 警告：仍有 shadow、smartd 或 mdadm 被选中！"
-          else
-            echo "✅ 所有 shadow、smartd、smartmontools、mdadm 已成功禁用"
-          fi
-
           echo "✅ 配置已加载：${{ env.DEVICE }}-${{ env.LAYOUT }}（$TARGET_DEVICE）"
+
+      # ============================================================
+      # 单线程编译工具链（关键：确保 libtool 成功）
+      # ============================================================
+      - name: 单线程编译工具链
+        working-directory: ImmortalWrt
+        run: |
+          set -o pipefail
+          echo "==== 编译 tools（含 libtool）===="
+          make tools/install -j1 V=s 2>&1 | tee tools.log || {
+            echo "❌ tools 编译失败！错误行："
+            grep -n "error:" tools.log | head -20 || true
+            exit 1
+          }
+          echo "✅ tools 编译完成"
 
       - name: 编译前上传配置
         uses: actions/upload-artifact@v6
         with:
           name: config-before-build
           path: |
-            ImmortalWrt/feeds.conf.default
             ImmortalWrt/.config
 
+      # ============================================================
+      # 编译固件
+      # ============================================================
       - name: 多线程编译
         if: ${{ inputs.multithreading == true }}
         working-directory: ImmortalWrt
-        run: make -j$(nproc) V=s 2>&1 | tee build.log
+        run: |
+          set -o pipefail
+          make -j$(nproc) V=s 2>&1 | tee build.log
 
       - name: 单线程编译
         if: ${{ inputs.multithreading == false }}
         working-directory: ImmortalWrt
-        run: make -j1 V=s 2>&1 | tee build.log
+        run: |
+          set -o pipefail
+          make -j1 V=s 2>&1 | tee build.log
 
       - name: 上传编译日志
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: build-log
-          path: ImmortalWrt/build.log
+          path: |
+            ImmortalWrt/build.log
+            ImmortalWrt/tools.log
 
-      - name: 提取编译错误上下文
-        if: failure()
+      - name: 检查是否生成固件
+        if: always()
         working-directory: ImmortalWrt
         run: |
-          echo "===== 提取编译错误 ====="
-          if [ -f build.log ]; then
-            echo "===== 所有 error: 行 ====="
-            grep -n "error:" build.log | head -30 || echo "(无 error: 行)"
-            echo ""
-            echo "===== Download failed 相关 ====="
-            grep -n -B3 -A3 "Download failed" build.log | head -60 || echo "(无)"
-            echo ""
-            echo "===== failed to build 相关 ====="
-            grep -n -B3 -A3 "failed to build" build.log | head -60 || echo "(无)"
-          else
-            echo "⚠️ build.log 不存在"
-          fi
+          echo "==== bin/targets 目录 ===="
+          ls -la bin/targets/mediatek/filogic/ 2>/dev/null || echo "(目录不存在)"
+          echo ""
+          echo "==== 查找 .bin 固件 ===="
+          find bin/targets -name "*.bin" -type f 2>/dev/null | head -20 || echo "(无 .bin 文件)"
+          echo ""
+          echo "==== build.log 最后 50 行 ===="
+          tail -50 build.log 2>/dev/null || echo "(build.log 不存在)"
 
       - name: 编译后版本校验并提取版本信息
         id: extract-version
         working-directory: ImmortalWrt
         run: |
-          echo "==== git describe ===="
           FW_TAG=$(git describe --tags 2>/dev/null || echo "unknown")
-          echo "FW_TAG=$FW_TAG"
           FW_VERSION=${FW_TAG#v}
           echo "FW_VERSION=$FW_VERSION" >> $GITHUB_ENV
           echo "fw_version=$FW_VERSION" >> $GITHUB_OUTPUT
-          echo "✅ 提取版本号: $FW_VERSION"
-
-          echo "==== profiles.json version ===="
-          cat bin/targets/*/*/profiles.json 2>/dev/null | grep version_number || echo "profiles.json 未找到"
-          echo "==== openwrt_release ===="
-          cat package/base-files/files/etc/openwrt_release 2>/dev/null || echo "openwrt_release 未找到"
+          echo "✅ 版本号: $FW_VERSION"
+          cat bin/targets/*/*/profiles.json 2>/dev/null | grep version_number || true
 
       - name: 上传编译结果
         uses: actions/upload-artifact@v6
@@ -586,7 +555,7 @@ jobs:
 
       - name: 复制自定义配置文件
         run: |
-          cp -f feeds.conf.default diy.sh seed.config mt7981-ax3000-slim.config \
+          cp -f diy.sh seed.config mt7981-ax3000-slim.config \
             ImmortalWrt/ 2>/dev/null || true
 
       - name: 运行 diy.sh
@@ -606,7 +575,6 @@ jobs:
       - name: 替换 OpenWrt 下载源
         working-directory: ImmortalWrt
         run: |
-          echo "==== 替换默认下载源 ===="
           find . -name "*.mk" -path "*include*" 2>/dev/null | while read f; do
             if grep -q "mirror2\.immortalwrt\.org" "$f" 2>/dev/null; then
               sed -i 's|mirror2\.immortalwrt\.org|sources.openwrt.org|g' "$f"
@@ -622,13 +590,9 @@ jobs:
       - name: 预下载 gnulib
         working-directory: ImmortalWrt
         run: |
-          echo "==== 预下载 gnulib ===="
           mkdir -p dl
           GNULIB_FILE="gnulib-c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz"
-          if [ -f "dl/$GNULIB_FILE" ]; then
-            echo "⏭️ 已存在，跳过"
-            exit 0
-          fi
+          if [ -f "dl/$GNULIB_FILE" ]; then exit 0; fi
           MIRRORS=(
             "https://sources.openwrt.org/$GNULIB_FILE"
             "https://sources.cdn.openwrt.org/$GNULIB_FILE"
@@ -636,28 +600,21 @@ jobs:
             "https://downloads.openwrt.org/sources/$GNULIB_FILE"
           )
           for url in "${MIRRORS[@]}"; do
-            echo "尝试: $url"
             if wget -q --timeout=30 --tries=2 -O "dl/$GNULIB_FILE" "$url"; then
               SIZE=$(stat -c %s "dl/$GNULIB_FILE" 2>/dev/null || echo 0)
               if [ "$SIZE" -gt 10000 ]; then
-                echo "✅ 下载成功: $url ($SIZE bytes)"
+                echo "✅ 下载成功: $url"
                 exit 0
-              else
-                rm -f "dl/$GNULIB_FILE"
               fi
             fi
           done
-          echo "⚠️ 所有镜像都失败，继续让 OpenWrt 自己尝试"
+          echo "⚠️ 所有镜像都失败"
 
       - name: 修复 iproute2 编译错误
         working-directory: ImmortalWrt
         run: |
-          echo "==== 修复 iproute2 编译错误 ===="
           IPROUTE_DIR="package/network/utils/iproute2"
-          if [ ! -d "$IPROUTE_DIR" ]; then
-            echo "⚠️ 未找到 $IPROUTE_DIR，跳过"
-            exit 0
-          fi
+          if [ ! -d "$IPROUTE_DIR" ]; then exit 0; fi
           mkdir -p "$IPROUTE_DIR/patches"
           PATCH="$IPROUTE_DIR/patches/012-libnetlink-fix-build-with-musl-and-gcc-14.patch"
           {
@@ -671,32 +628,23 @@ jobs:
             echo ' #include <stdio.h>'
             echo ' #include <string.h>'
           } > "$PATCH"
-          echo "✅ 已创建补丁: $PATCH"
+          echo "✅ 已创建补丁"
 
       - name: 修复 mt_wifi 编译错误
         working-directory: ImmortalWrt
         run: |
-          echo "==== 修复 mt_wifi 编译错误 ===="
           MTWIFI_MK="package/mtk/drivers/mt_wifi/Makefile"
-          if [ ! -f "$MTWIFI_MK" ]; then
-            echo "⚠️ 未找到 $MTWIFI_MK，跳过"
-            exit 0
-          fi
+          if [ ! -f "$MTWIFI_MK" ]; then exit 0; fi
           if ! grep -q "Wno-error=implicit-function-declaration" "$MTWIFI_MK"; then
             {
               echo ''
-              echo '# ===== 自动追加：忽略 GCC 13 严格检查 ====='
               echo 'TARGET_CFLAGS += -Wno-error=implicit-function-declaration'
               echo 'TARGET_CFLAGS += -Wno-error=incompatible-pointer-types'
               echo 'TARGET_CFLAGS += -Wno-error=int-conversion'
               echo 'TARGET_CFLAGS += -Wno-error=format-nonliteral'
               echo 'TARGET_CFLAGS += -Wno-error=stringop-overflow'
               echo 'TARGET_CFLAGS += -Wno-error=array-bounds'
-              echo '# ===== 自动追加结束 ====='
             } >> "$MTWIFI_MK"
-            echo "✅ 已追加忽略规则"
-          else
-            echo "⏭️ 已存在，跳过"
           fi
 
       - name: 修复 libxcrypt Makefile
@@ -704,21 +652,27 @@ jobs:
         run: |
           LIBMK=$(find package -path "*libxcrypt*/Makefile" 2>/dev/null | head -1 || true)
           if [ -n "$LIBMK" ]; then
-            echo "🔧 找到: $LIBMK"
             if ! grep -q "format-nonliteral" "$LIBMK"; then
               sed -i '/^define Package\/libxcrypt\/install/i TARGET_CFLAGS += -Wno-error=format-nonliteral' "$LIBMK"
-              echo "✅ 已添加 TARGET_CFLAGS"
             fi
-          else
-            echo "⚠️ 未找到 libxcrypt Makefile"
           fi
+
+      - name: 清理 libtool 残留
+        working-directory: ImmortalWrt
+        run: |
+          rm -rf build_dir/host/libtool-* || true
+          rm -rf build_dir/host/libtool || true
+          rm -rf staging_dir/host/share/aclocal/libtool.m4 || true
+          rm -rf staging_dir/host/share/aclocal/lt*.m4 || true
+          rm -rf staging_dir/host/bin/libtool* || true
+          rm -rf staging_dir/host/lib/libltdl* || true
+          echo "✅ libtool 残留已清理"
 
       - name: 清理 default-settings 中的不必要依赖
         working-directory: ImmortalWrt
         run: |
           for file in $(find package/ -path "*default-settings*" \
             \( -name "Makefile" -o -name "*.mk" \) 2>/dev/null); do
-            echo "🔧 处理: $file"
             sed -i -E 's/\+shadow[a-z0-9-]*\b//g' "$file"
             sed -i -E 's/\+mdadm\b//g' "$file"
             sed -i -E 's/\+smartmontools[a-z0-9-]*\b//g' "$file"
@@ -735,7 +689,7 @@ jobs:
             AX3000T-stock) TARGET_DEVICE="xiaomi_mi-router-ax3000t" ;;
             AX3000T-112m)  TARGET_DEVICE="xiaomi_mi-router-ax3000t-mtkuboot" ;;
             *)
-              echo "❌ 未知组合: ${{ env.DEVICE }}-${{ env.LAYOUT }}"
+              echo "❌ 未知组合"
               exit 1
               ;;
           esac
@@ -784,20 +738,23 @@ jobs:
           SELECTED=$(grep -c "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y" .config || true)
           SELECTED=${SELECTED:-0}
 
-          echo "==== 选中的设备数: $SELECTED ===="
-          grep "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y" .config || true
-
           if [ "$SELECTED" -ne 1 ]; then
-            echo "❌ 错误：选中的设备数不为 1，实际为 $SELECTED"
-            exit 1
-          fi
-
-          if ! grep -q "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${TARGET_DEVICE}=y" .config; then
-            echo "❌ 错误：目标设备 $TARGET_DEVICE 未被选中！"
+            echo "❌ 错误：选中的设备数不为 1"
             exit 1
           fi
 
           echo "✅ 配置已加载：${{ env.DEVICE }}-${{ env.LAYOUT }}（$TARGET_DEVICE）"
+
+      - name: 单线程编译工具链
+        working-directory: ImmortalWrt
+        run: |
+          set -o pipefail
+          make tools/install -j1 V=s 2>&1 | tee tools.log || {
+            echo "❌ tools 编译失败！"
+            grep -n "error:" tools.log | head -20 || true
+            exit 1
+          }
+          echo "✅ tools 编译完成"
 
       - name: 开启 SSH 服务
         uses: lhotari/action-upterm@v1
@@ -809,40 +766,38 @@ jobs:
         with:
           name: config-before-build
           path: |
-            ImmortalWrt/feeds.conf.default
             ImmortalWrt/.config
 
       - name: 多线程编译
         if: ${{ inputs.multithreading == true }}
         working-directory: ImmortalWrt
-        run: make -j$(nproc) V=s 2>&1 | tee build.log
+        run: |
+          set -o pipefail
+          make -j$(nproc) V=s 2>&1 | tee build.log
 
       - name: 单线程编译
         if: ${{ inputs.multithreading == false }}
         working-directory: ImmortalWrt
-        run: make -j1 V=s 2>&1 | tee build.log
+        run: |
+          set -o pipefail
+          make -j1 V=s 2>&1 | tee build.log
 
       - name: 上传编译日志
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: build-log-ssh
-          path: ImmortalWrt/build.log
+          path: |
+            ImmortalWrt/build.log
+            ImmortalWrt/tools.log
 
-      - name: 提取编译错误上下文
-        if: failure()
+      - name: 检查是否生成固件
+        if: always()
         working-directory: ImmortalWrt
         run: |
-          echo "===== 提取编译错误 ====="
-          if [ -f build.log ]; then
-            echo "===== 所有 error: 行 ====="
-            grep -n "error:" build.log | head -30 || echo "(无 error: 行)"
-            echo ""
-            echo "===== Download failed 相关 ====="
-            grep -n -B3 -A3 "Download failed" build.log | head -60 || echo "(无)"
-          else
-            echo "⚠️ build.log 不存在"
-          fi
+          ls -la bin/targets/mediatek/filogic/ 2>/dev/null || echo "(目录不存在)"
+          find bin/targets -name "*.bin" -type f 2>/dev/null | head -20 || echo "(无 .bin 文件)"
+          tail -50 build.log 2>/dev/null || echo "(build.log 不存在)"
 
       - name: 编译后版本校验并提取版本信息
         id: extract-version-ssh
