@@ -149,6 +149,69 @@ jobs:
         run: ./scripts/feeds update -a && ./scripts/feeds install -a
 
       # ============================================================
+      # 🔧 替换失效的下载源（mirror2.immortalwrt.org 返回 400）
+      # ============================================================
+      - name: 替换 OpenWrt 下载源
+        working-directory: ImmortalWrt
+        run: |
+          echo "==== 替换默认下载源 ===="
+          # 把失效的 mirror2.immortalwrt.org 替换为可用的官方镜像
+          find . -name "*.mk" -path "*include*" 2>/dev/null | while read f; do
+            if grep -q "mirror2\.immortalwrt\.org" "$f" 2>/dev/null; then
+              echo "🔧 修复: $f"
+              sed -i 's|mirror2\.immortalwrt\.org|sources.openwrt.org|g' "$f"
+            fi
+          done
+          find . -name "*.mk" -path "*include*" 2>/dev/null | while read f; do
+            if grep -q "mirror\.immortalwrt\.org" "$f" 2>/dev/null; then
+              echo "🔧 修复: $f"
+              sed -i 's|mirror\.immortalwrt\.org|sources.openwrt.org|g' "$f"
+            fi
+          done
+          echo "✅ 下载源替换完成"
+
+      # ============================================================
+      # 🔧 预下载 gnulib（防止某个镜像 400 导致 bison 编译失败）
+      # ============================================================
+      - name: 预下载 gnulib
+        working-directory: ImmortalWrt
+        run: |
+          echo "==== 预下载 gnulib ===="
+          mkdir -p dl
+          GNULIB_FILE="gnulib-c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz"
+
+          if [ -f "dl/$GNULIB_FILE" ]; then
+            echo "⏭️ 已存在，跳过"
+            ls -la "dl/$GNULIB_FILE"
+            exit 0
+          fi
+
+          MIRRORS=(
+            "https://sources.openwrt.org/$GNULIB_FILE"
+            "https://sources.cdn.openwrt.org/$GNULIB_FILE"
+            "https://mirror-03.infra.openwrt.org/sources/$GNULIB_FILE"
+            "https://downloads.openwrt.org/sources/$GNULIB_FILE"
+          )
+
+          for url in "${MIRRORS[@]}"; do
+            echo "尝试: $url"
+            if wget -q --timeout=30 --tries=2 -O "dl/$GNULIB_FILE" "$url"; then
+              SIZE=$(stat -c %s "dl/$GNULIB_FILE" 2>/dev/null || echo 0)
+              if [ "$SIZE" -gt 10000 ]; then
+                echo "✅ 下载成功: $url ($SIZE bytes)"
+                exit 0
+              else
+                echo "⚠️ 文件太小，重试下一个"
+                rm -f "dl/$GNULIB_FILE"
+              fi
+            else
+              echo "❌ 失败: $url"
+            fi
+          done
+
+          echo "⚠️ 所有镜像都失败，继续让 OpenWrt 自己尝试"
+
+      # ============================================================
       # 🔧 修复 iproute2/tc-tiny 编译错误（htobe64 缺失）
       # ============================================================
       - name: 修复 iproute2 编译错误
@@ -178,11 +241,6 @@ jobs:
 
       # ============================================================
       # 🔧 修复 mt_wifi GCC 13 编译错误
-      # 常见错误：
-      #   - implicit declaration of function
-      #   - incompatible pointer types
-      #   - int conversion
-      #   - format not a string literal
       # ============================================================
       - name: 修复 mt_wifi 编译错误
         working-directory: ImmortalWrt
@@ -197,7 +255,6 @@ jobs:
           grep -n "TARGET_CFLAGS" "$MTWIFI_MK" || echo "(无)"
 
           if ! grep -q "Wno-error=implicit-function-declaration" "$MTWIFI_MK"; then
-            # 在 Makefile 末尾追加全局 CFLAGS（幂等）
             {
               echo ''
               echo '# ===== 自动追加：忽略 GCC 13 严格检查 ====='
@@ -392,6 +449,24 @@ jobs:
           name: build-log
           path: ImmortalWrt/build.log
 
+      - name: 提取编译错误上下文
+        if: failure()
+        working-directory: ImmortalWrt
+        run: |
+          echo "===== 提取编译错误 ====="
+          if [ -f build.log ]; then
+            echo "===== 所有 error: 行 ====="
+            grep -n "error:" build.log | head -30 || echo "(无 error: 行)"
+            echo ""
+            echo "===== Download failed 相关 ====="
+            grep -n -B3 -A3 "Download failed" build.log | head -60 || echo "(无)"
+            echo ""
+            echo "===== failed to build 相关 ====="
+            grep -n -B3 -A3 "failed to build" build.log | head -60 || echo "(无)"
+          else
+            echo "⚠️ build.log 不存在"
+          fi
+
       - name: 编译后版本校验并提取版本信息
         id: extract-version
         working-directory: ImmortalWrt
@@ -527,6 +602,52 @@ jobs:
       - name: 更新并下载 feeds
         working-directory: ImmortalWrt
         run: ./scripts/feeds update -a && ./scripts/feeds install -a
+
+      - name: 替换 OpenWrt 下载源
+        working-directory: ImmortalWrt
+        run: |
+          echo "==== 替换默认下载源 ===="
+          find . -name "*.mk" -path "*include*" 2>/dev/null | while read f; do
+            if grep -q "mirror2\.immortalwrt\.org" "$f" 2>/dev/null; then
+              sed -i 's|mirror2\.immortalwrt\.org|sources.openwrt.org|g' "$f"
+            fi
+          done
+          find . -name "*.mk" -path "*include*" 2>/dev/null | while read f; do
+            if grep -q "mirror\.immortalwrt\.org" "$f" 2>/dev/null; then
+              sed -i 's|mirror\.immortalwrt\.org|sources.openwrt.org|g' "$f"
+            fi
+          done
+          echo "✅ 下载源替换完成"
+
+      - name: 预下载 gnulib
+        working-directory: ImmortalWrt
+        run: |
+          echo "==== 预下载 gnulib ===="
+          mkdir -p dl
+          GNULIB_FILE="gnulib-c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz"
+          if [ -f "dl/$GNULIB_FILE" ]; then
+            echo "⏭️ 已存在，跳过"
+            exit 0
+          fi
+          MIRRORS=(
+            "https://sources.openwrt.org/$GNULIB_FILE"
+            "https://sources.cdn.openwrt.org/$GNULIB_FILE"
+            "https://mirror-03.infra.openwrt.org/sources/$GNULIB_FILE"
+            "https://downloads.openwrt.org/sources/$GNULIB_FILE"
+          )
+          for url in "${MIRRORS[@]}"; do
+            echo "尝试: $url"
+            if wget -q --timeout=30 --tries=2 -O "dl/$GNULIB_FILE" "$url"; then
+              SIZE=$(stat -c %s "dl/$GNULIB_FILE" 2>/dev/null || echo 0)
+              if [ "$SIZE" -gt 10000 ]; then
+                echo "✅ 下载成功: $url ($SIZE bytes)"
+                exit 0
+              else
+                rm -f "dl/$GNULIB_FILE"
+              fi
+            fi
+          done
+          echo "⚠️ 所有镜像都失败，继续让 OpenWrt 自己尝试"
 
       - name: 修复 iproute2 编译错误
         working-directory: ImmortalWrt
@@ -708,19 +829,30 @@ jobs:
           name: build-log-ssh
           path: ImmortalWrt/build.log
 
+      - name: 提取编译错误上下文
+        if: failure()
+        working-directory: ImmortalWrt
+        run: |
+          echo "===== 提取编译错误 ====="
+          if [ -f build.log ]; then
+            echo "===== 所有 error: 行 ====="
+            grep -n "error:" build.log | head -30 || echo "(无 error: 行)"
+            echo ""
+            echo "===== Download failed 相关 ====="
+            grep -n -B3 -A3 "Download failed" build.log | head -60 || echo "(无)"
+          else
+            echo "⚠️ build.log 不存在"
+          fi
+
       - name: 编译后版本校验并提取版本信息
         id: extract-version-ssh
         working-directory: ImmortalWrt
         run: |
-          echo "==== git describe ===="
           FW_TAG=$(git describe --tags 2>/dev/null || echo "unknown")
-          echo "FW_TAG=$FW_TAG"
           FW_VERSION=${FW_TAG#v}
           echo "FW_VERSION=$FW_VERSION" >> $GITHUB_ENV
           echo "fw_version=$FW_VERSION" >> $GITHUB_OUTPUT
-
-          echo "==== profiles.json version ===="
-          cat bin/targets/*/*/profiles.json 2>/dev/null | grep version_number || echo "profiles.json 未找到"
+          cat bin/targets/*/*/profiles.json 2>/dev/null | grep version_number || true
 
       - name: 上传编译结果
         uses: actions/upload-artifact@v6
