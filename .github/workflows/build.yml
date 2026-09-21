@@ -40,6 +40,12 @@ jobs:
     outputs:
       fw_version: ${{ steps.extract-version.outputs.fw_version }}
     steps:
+      - name: 释放磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h
+
       - name: 下载编译所需的依赖
         run: |
           sudo apt update
@@ -144,8 +150,6 @@ jobs:
 
       # ============================================================
       # 🔧 修复 iproute2/tc-tiny 编译错误（htobe64 缺失）
-      # 说明：头文件 libnetlink.h 在 package 目录里不存在，
-      #       必须写成补丁放到 patches/ 目录，让构建时自动应用。
       # ============================================================
       - name: 修复 iproute2 编译错误
         working-directory: ImmortalWrt
@@ -170,18 +174,59 @@ jobs:
             echo ' #include <string.h>'
           } > "$PATCH"
           echo "✅ 已创建补丁: $PATCH"
-          echo "==== 补丁内容 ===="
           cat "$PATCH"
 
       # ============================================================
-      # 🔧 修复 libxcrypt 编译错误（必须在 feeds install 之后）
+      # 🔧 修复 mt_wifi GCC 13 编译错误
+      # 常见错误：
+      #   - implicit declaration of function
+      #   - incompatible pointer types
+      #   - int conversion
+      #   - format not a string literal
+      # ============================================================
+      - name: 修复 mt_wifi 编译错误
+        working-directory: ImmortalWrt
+        run: |
+          echo "==== 修复 mt_wifi 编译错误 ===="
+          MTWIFI_MK="package/mtk/drivers/mt_wifi/Makefile"
+          if [ ! -f "$MTWIFI_MK" ]; then
+            echo "⚠️ 未找到 $MTWIFI_MK，跳过"
+            exit 0
+          fi
+          echo "📄 原始 Makefile 中的 TARGET_CFLAGS:"
+          grep -n "TARGET_CFLAGS" "$MTWIFI_MK" || echo "(无)"
+
+          if ! grep -q "Wno-error=implicit-function-declaration" "$MTWIFI_MK"; then
+            # 在 Makefile 末尾追加全局 CFLAGS（幂等）
+            {
+              echo ''
+              echo '# ===== 自动追加：忽略 GCC 13 严格检查 ====='
+              echo 'TARGET_CFLAGS += -Wno-error=implicit-function-declaration'
+              echo 'TARGET_CFLAGS += -Wno-error=incompatible-pointer-types'
+              echo 'TARGET_CFLAGS += -Wno-error=int-conversion'
+              echo 'TARGET_CFLAGS += -Wno-error=format-nonliteral'
+              echo 'TARGET_CFLAGS += -Wno-error=stringop-overflow'
+              echo 'TARGET_CFLAGS += -Wno-error=array-bounds'
+              echo '# ===== 自动追加结束 ====='
+            } >> "$MTWIFI_MK"
+            echo "✅ 已追加忽略规则"
+          else
+            echo "⏭️ 已存在，跳过"
+          fi
+
+          echo "📄 修改后 Makefile 中的 TARGET_CFLAGS:"
+          grep -n "TARGET_CFLAGS" "$MTWIFI_MK" || echo "(无)"
+
+      # ============================================================
+      # 🔧 修复 libxcrypt 编译错误（找不到就跳过）
       # ============================================================
       - name: 修复 libxcrypt Makefile
         working-directory: ImmortalWrt
         run: |
-          LIBMK=$(find package/feeds -path "*libxcrypt*/Makefile" 2>/dev/null | head -1 || true)
+          echo "==== 搜索 libxcrypt Makefile ===="
+          LIBMK=$(find package -path "*libxcrypt*/Makefile" 2>/dev/null | head -1 || true)
           if [ -n "$LIBMK" ]; then
-            echo "🔧 修复: $LIBMK"
+            echo "🔧 找到: $LIBMK"
             if ! grep -q "format-nonliteral" "$LIBMK"; then
               sed -i '/^define Package\/libxcrypt\/install/i TARGET_CFLAGS += -Wno-error=format-nonliteral' "$LIBMK"
               echo "✅ 已添加 TARGET_CFLAGS"
@@ -189,7 +234,7 @@ jobs:
               echo "⏭️ 已存在，跳过"
             fi
           else
-            echo "⚠️ 未找到 libxcrypt Makefile"
+            echo "⚠️ 未找到 libxcrypt Makefile（24.10 分支可能不再需要此包）"
           fi
 
       # ============================================================
@@ -333,12 +378,19 @@ jobs:
       - name: 多线程编译
         if: ${{ inputs.multithreading == true }}
         working-directory: ImmortalWrt
-        run: make -j$(nproc) V=s
+        run: make -j$(nproc) V=s 2>&1 | tee build.log
 
       - name: 单线程编译
         if: ${{ inputs.multithreading == false }}
         working-directory: ImmortalWrt
-        run: make -j1 V=s
+        run: make -j1 V=s 2>&1 | tee build.log
+
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: build-log
+          path: ImmortalWrt/build.log
 
       - name: 编译后版本校验并提取版本信息
         id: extract-version
@@ -385,6 +437,12 @@ jobs:
     name: 🚀 编译 (Build) - SSH
     runs-on: ubuntu-22.04
     steps:
+      - name: 释放磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h
+
       - name: 下载编译所需的依赖
         run: |
           sudo apt update
@@ -470,9 +528,6 @@ jobs:
         working-directory: ImmortalWrt
         run: ./scripts/feeds update -a && ./scripts/feeds install -a
 
-      # ============================================================
-      # 🔧 修复 iproute2/tc-tiny 编译错误（htobe64 缺失）
-      # ============================================================
       - name: 修复 iproute2 编译错误
         working-directory: ImmortalWrt
         run: |
@@ -496,19 +551,45 @@ jobs:
             echo ' #include <string.h>'
           } > "$PATCH"
           echo "✅ 已创建补丁: $PATCH"
-          echo "==== 补丁内容 ===="
-          cat "$PATCH"
+
+      - name: 修复 mt_wifi 编译错误
+        working-directory: ImmortalWrt
+        run: |
+          echo "==== 修复 mt_wifi 编译错误 ===="
+          MTWIFI_MK="package/mtk/drivers/mt_wifi/Makefile"
+          if [ ! -f "$MTWIFI_MK" ]; then
+            echo "⚠️ 未找到 $MTWIFI_MK，跳过"
+            exit 0
+          fi
+          if ! grep -q "Wno-error=implicit-function-declaration" "$MTWIFI_MK"; then
+            {
+              echo ''
+              echo '# ===== 自动追加：忽略 GCC 13 严格检查 ====='
+              echo 'TARGET_CFLAGS += -Wno-error=implicit-function-declaration'
+              echo 'TARGET_CFLAGS += -Wno-error=incompatible-pointer-types'
+              echo 'TARGET_CFLAGS += -Wno-error=int-conversion'
+              echo 'TARGET_CFLAGS += -Wno-error=format-nonliteral'
+              echo 'TARGET_CFLAGS += -Wno-error=stringop-overflow'
+              echo 'TARGET_CFLAGS += -Wno-error=array-bounds'
+              echo '# ===== 自动追加结束 ====='
+            } >> "$MTWIFI_MK"
+            echo "✅ 已追加忽略规则"
+          else
+            echo "⏭️ 已存在，跳过"
+          fi
 
       - name: 修复 libxcrypt Makefile
         working-directory: ImmortalWrt
         run: |
-          LIBMK=$(find package/feeds -path "*libxcrypt*/Makefile" 2>/dev/null | head -1 || true)
+          LIBMK=$(find package -path "*libxcrypt*/Makefile" 2>/dev/null | head -1 || true)
           if [ -n "$LIBMK" ]; then
-            echo "🔧 修复: $LIBMK"
+            echo "🔧 找到: $LIBMK"
             if ! grep -q "format-nonliteral" "$LIBMK"; then
               sed -i '/^define Package\/libxcrypt\/install/i TARGET_CFLAGS += -Wno-error=format-nonliteral' "$LIBMK"
               echo "✅ 已添加 TARGET_CFLAGS"
             fi
+          else
+            echo "⚠️ 未找到 libxcrypt Makefile"
           fi
 
       - name: 清理 default-settings 中的不必要依赖
@@ -613,12 +694,19 @@ jobs:
       - name: 多线程编译
         if: ${{ inputs.multithreading == true }}
         working-directory: ImmortalWrt
-        run: make -j$(nproc) V=s
+        run: make -j$(nproc) V=s 2>&1 | tee build.log
 
       - name: 单线程编译
         if: ${{ inputs.multithreading == false }}
         working-directory: ImmortalWrt
-        run: make -j1 V=s
+        run: make -j1 V=s 2>&1 | tee build.log
+
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: build-log-ssh
+          path: ImmortalWrt/build.log
 
       - name: 编译后版本校验并提取版本信息
         id: extract-version-ssh
@@ -630,12 +718,9 @@ jobs:
           FW_VERSION=${FW_TAG#v}
           echo "FW_VERSION=$FW_VERSION" >> $GITHUB_ENV
           echo "fw_version=$FW_VERSION" >> $GITHUB_OUTPUT
-          echo "✅ 提取版本号: $FW_VERSION"
 
           echo "==== profiles.json version ===="
           cat bin/targets/*/*/profiles.json 2>/dev/null | grep version_number || echo "profiles.json 未找到"
-          echo "==== openwrt_release ===="
-          cat package/base-files/files/etc/openwrt_release 2>/dev/null || echo "openwrt_release 未找到"
 
       - name: 上传编译结果
         uses: actions/upload-artifact@v6
