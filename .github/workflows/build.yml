@@ -1,4 +1,4 @@
-name: 🔍 排查 mt_wifi（含内核）
+name: 🔍 排查 mt_wifi（含内核 + 修复 pStaMacAddr）
 
 on:
   workflow_dispatch:
@@ -98,6 +98,38 @@ jobs:
             } >> "$MTWIFI_MK"
           fi
 
+      # ============================================================
+      # ★★★ 关键修复：给 ap_cfg.c 补上 pStaMacAddr 声明 ★★★
+      # ============================================================
+      - name: 修复 ap_cfg.c 的 pStaMacAddr 未声明
+        working-directory: ImmortalWrt
+        run: |
+          echo "==== 查找 ap_cfg.c ===="
+          APCFG=$(find package/mtk/drivers/mt_wifi -name "ap_cfg.c" 2>/dev/null | head -1)
+          echo "路径: $APCFG"
+          [ -n "$APCFG" ] || { echo "❌ 未找到"; exit 1; }
+
+          echo "==== 修改前 pStaMacAddr 出现位置 ===="
+          grep -n "pStaMacAddr" "$APCFG"
+
+          # 备份
+          cp "$APCFG" "$APCFG.bak"
+
+          # 在每个 os_alloc_mem(NULL, &pStaMacAddr, MAC_ADDR_LEN); 前面插入声明
+          # 使用 \s* 匹配行首空白，\1 保留缩进
+          sed -i 's/^\(\s*\)os_alloc_mem(NULL, &pStaMacAddr, MAC_ADDR_LEN);/\1PUCHAR pStaMacAddr = NULL;\n\1os_alloc_mem(NULL, \&pStaMacAddr, MAC_ADDR_LEN);/g' "$APCFG"
+
+          echo ""
+          echo "==== 修改后 pStaMacAddr 出现位置 ===="
+          grep -n "pStaMacAddr" "$APCFG"
+
+          echo ""
+          echo "==== 验证：声明数量应该 >= 使用次数 ===="
+          DECL_COUNT=$(grep -c "PUCHAR pStaMacAddr = NULL;" "$APCFG" || true)
+          USE_COUNT=$(grep -c "os_alloc_mem(NULL, &pStaMacAddr" "$APCFG" || true)
+          echo "声明数: $DECL_COUNT，使用数: $USE_COUNT"
+          [ "$DECL_COUNT" -ge "$USE_COUNT" ] && echo "✅ 修复成功" || echo "⚠️ 可能失败"
+
       - name: 加载设备
         working-directory: ImmortalWrt
         run: |
@@ -118,78 +150,20 @@ jobs:
           make oldconfig < /dev/null
           grep "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y" .config
 
-      # ============================================================
-      # 1. tools
-      # ============================================================
       - name: 编译 tools
         working-directory: ImmortalWrt
         run: make tools/install -j$(nproc) V=s 2>&1 | tail -5
 
-      # ============================================================
-      # 2. toolchain
-      # ============================================================
       - name: 编译 toolchain
         working-directory: ImmortalWrt
         run: make toolchain/install -j$(nproc) V=s 2>&1 | tail -5
 
-      # ============================================================
-      # 3. Linux 内核（内核模块的前置依赖）
-      # ============================================================
       - name: 编译 Linux 内核
         working-directory: ImmortalWrt
         run: |
-          echo "==== 编译 target/linux ===="
-          make target/linux/compile -j$(nproc) V=s 2>&1 | tee kernel.log | tail -30
-
-          echo ""
-          echo "==== 验证内核 .config ===="
+          make target/linux/compile -j$(nproc) V=s 2>&1 | tee kernel.log | tail -20
           ls -la build_dir/target-aarch64_cortex-a53_musl/linux-mediatek_filogic/linux-6.6.133/.config 2>/dev/null || echo "⚠️ 内核 .config 不存在"
 
-      # ============================================================
-      # 4. ★ 打印 ap_cfg.c 出错行上下文（关键步骤）
-      # ============================================================
-      - name: 打印 ap_cfg.c 出错行上下文
-        working-directory: ImmortalWrt
-        run: |
-          echo "==================================================="
-          echo "===== 查找 ap_cfg.c ====="
-          echo "==================================================="
-          APCFG=$(find package/mtk/drivers/mt_wifi -name "ap_cfg.c" 2>/dev/null | head -1)
-          echo "路径: $APCFG"
-          echo ""
-
-          if [ -z "$APCFG" ]; then
-            echo "❌ 未找到 ap_cfg.c"
-            find package/mtk/drivers/mt_wifi -name "*.c" 2>/dev/null | head -20
-            exit 0
-          fi
-
-          echo "==================================================="
-          echo "===== 第 12850 ~ 12960 行 ====="
-          echo "==================================================="
-          sed -n '12850,12960p' "$APCFG"
-
-          echo ""
-          echo "==================================================="
-          echo "===== 搜 pStaMacAddr 出现的所有位置 ====="
-          echo "==================================================="
-          grep -n "pStaMacAddr" "$APCFG" || echo "(未找到 pStaMacAddr)"
-
-          echo ""
-          echo "==================================================="
-          echo "===== 搜 pStaAddr（可能是笔误）====="
-          echo "==================================================="
-          grep -n "pStaAddr" "$APCFG" | head -20 || echo "(未找到)"
-
-          echo ""
-          echo "==================================================="
-          echo "===== 12948 行前后 20 行（精确定位）====="
-          echo "==================================================="
-          sed -n '12928,12968p' "$APCFG"
-
-      # ============================================================
-      # 5. 编 mt_wifi
-      # ============================================================
       - name: 编译 mt_wifi
         working-directory: ImmortalWrt
         continue-on-error: true
@@ -197,15 +171,15 @@ jobs:
           rm -rf build_dir/target-*/linux-*/mt_wifi* 2>/dev/null || true
           make package/mtk/drivers/mt_wifi/compile -j$(nproc) V=s > mt_wifi.log 2>&1 || true
 
-      - name: 打印 mt_wifi 错误
+      - name: 打印 mt_wifi 结果
         if: always()
         working-directory: ImmortalWrt
         run: |
           echo "==== error: 行 ===="
           grep -n "error:" mt_wifi.log | head -30 || echo "(无)"
           echo ""
-          echo "==== 最后 50 行 ===="
-          tail -50 mt_wifi.log
+          echo "==== 最后 30 行 ===="
+          tail -30 mt_wifi.log
 
       - name: 上传日志
         if: always()
