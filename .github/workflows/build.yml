@@ -133,7 +133,7 @@ jobs:
         run: make toolchain/install -j$(nproc) V=s 2>&1 | tail -5
 
       # ============================================================
-      # 3. kernel ← 之前漏掉的关键一步
+      # 3. Linux 内核（内核模块的前置依赖）
       # ============================================================
       - name: 编译 Linux 内核
         working-directory: ImmortalWrt
@@ -144,10 +144,51 @@ jobs:
           echo ""
           echo "==== 验证内核 .config ===="
           ls -la build_dir/target-aarch64_cortex-a53_musl/linux-mediatek_filogic/linux-6.6.133/.config 2>/dev/null || echo "⚠️ 内核 .config 不存在"
-          ls -la build_dir/target-aarch64_cortex-a53_musl/linux-mediatek_filogic/linux-6.6.133/vmlinux 2>/dev/null || echo "⚠️ vmlinux 不存在"
 
       # ============================================================
-      # 4. 编 mt_wifi
+      # 4. ★ 打印 ap_cfg.c 出错行上下文（关键步骤）
+      # ============================================================
+      - name: 打印 ap_cfg.c 出错行上下文
+        working-directory: ImmortalWrt
+        run: |
+          echo "==================================================="
+          echo "===== 查找 ap_cfg.c ====="
+          echo "==================================================="
+          APCFG=$(find package/mtk/drivers/mt_wifi -name "ap_cfg.c" 2>/dev/null | head -1)
+          echo "路径: $APCFG"
+          echo ""
+
+          if [ -z "$APCFG" ]; then
+            echo "❌ 未找到 ap_cfg.c"
+            find package/mtk/drivers/mt_wifi -name "*.c" 2>/dev/null | head -20
+            exit 0
+          fi
+
+          echo "==================================================="
+          echo "===== 第 12850 ~ 12960 行 ====="
+          echo "==================================================="
+          sed -n '12850,12960p' "$APCFG"
+
+          echo ""
+          echo "==================================================="
+          echo "===== 搜 pStaMacAddr 出现的所有位置 ====="
+          echo "==================================================="
+          grep -n "pStaMacAddr" "$APCFG" || echo "(未找到 pStaMacAddr)"
+
+          echo ""
+          echo "==================================================="
+          echo "===== 搜 pStaAddr（可能是笔误）====="
+          echo "==================================================="
+          grep -n "pStaAddr" "$APCFG" | head -20 || echo "(未找到)"
+
+          echo ""
+          echo "==================================================="
+          echo "===== 12948 行前后 20 行（精确定位）====="
+          echo "==================================================="
+          sed -n '12928,12968p' "$APCFG"
+
+      # ============================================================
+      # 5. 编 mt_wifi
       # ============================================================
       - name: 编译 mt_wifi
         working-directory: ImmortalWrt
