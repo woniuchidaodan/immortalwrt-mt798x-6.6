@@ -203,14 +203,13 @@ jobs:
           fi
 
       # ============================================================
-      # ★ 修复 1：ap_cfg.c 的 pStaMacAddr 未声明
+      # 修复 1：ap_cfg.c 的 pStaMacAddr 未声明
       # ============================================================
       - name: 修复 ap_cfg.c 的 pStaMacAddr 未声明
         working-directory: ImmortalWrt
         run: |
           APCFG=$(find package/mtk/drivers/mt_wifi -name "ap_cfg.c" 2>/dev/null | head -1)
           if [ -z "$APCFG" ]; then echo "⚠️ 未找到"; exit 0; fi
-          echo "路径: $APCFG"
           cp "$APCFG" "$APCFG.bak"
           sed -i 's/^\(\s*\)os_alloc_mem(NULL, &pStaMacAddr, MAC_ADDR_LEN);/\1PUCHAR pStaMacAddr = NULL;\n\1os_alloc_mem(NULL, \&pStaMacAddr, MAC_ADDR_LEN);/g' "$APCFG"
           DECL_COUNT=$(grep -c "PUCHAR pStaMacAddr = NULL;" "$APCFG" || true)
@@ -219,14 +218,13 @@ jobs:
           [ "$DECL_COUNT" -ge "$USE_COUNT" ] && echo "✅ pStaMacAddr 修复成功" || echo "⚠️ 可能失败"
 
       # ============================================================
-      # ★ 修复 2：eeprom.c 缺失的 7 个预校准宏
+      # 修复 2：eeprom.c 缺失的 7 个预校准宏
       # ============================================================
       - name: 修复 eeprom.c 缺失的预校准宏
         working-directory: ImmortalWrt
         run: |
           EEPROM=$(find package/mtk/drivers/mt_wifi -name "eeprom.c" 2>/dev/null | head -1)
           if [ -z "$EEPROM" ]; then echo "⚠️ 未找到 eeprom.c"; exit 0; fi
-          echo "路径: $EEPROM"
           cp "$EEPROM" "$EEPROM.bak"
 
           if grep -q "MTK_PRE_CAL_LAYOUT_FIX" "$EEPROM"; then
@@ -236,46 +234,106 @@ jobs:
 
           sed -i '0,/^#include/{s/^#include/#define MTK_PRE_CAL_LAYOUT_FIX 1\n#define PRE_CAL_SIZE_ONE_CARD   0x10000\n#define PRECALPART_OFFSET       0x0\n#define DCOC_IMAGE_SIZE         0x1000\n#define TXDPD_IMAGE1_SIZE       0x1000\n#define TXDPD_IMAGE2_SIZE       0x1000\n#define DPDPART1_OFFSET         0x1000\n#define DPDPART2_OFFSET         0x2000\n#include/}' "$EEPROM"
 
-          echo "==== 修复后前 20 行 ===="
-          head -20 "$EEPROM"
-
-          echo ""
           echo "==== 验证宏定义 ===="
           for m in PRE_CAL_SIZE_ONE_CARD PRECALPART_OFFSET DCOC_IMAGE_SIZE TXDPD_IMAGE1_SIZE TXDPD_IMAGE2_SIZE DPDPART1_OFFSET DPDPART2_OFFSET; do
-            if grep -q "define $m" "$EEPROM"; then
-              echo "✅ $m"
-            else
-              echo "❌ $m 缺失"
-            fi
+            grep -q "define $m" "$EEPROM" && echo "✅ $m" || echo "❌ $m 缺失"
           done
 
       # ============================================================
-      # ★ 修复 3：rt_profile.c 的 netif_rx_ni 在 Linux 6.6 被删除
+      # 修复 3：rt_profile.c 的 netif_rx_ni 在 Linux 6.6 被删除
       # ============================================================
       - name: 修复 rt_profile.c 的 netif_rx_ni
         working-directory: ImmortalWrt
         run: |
           RTPROFILE=$(find package/mtk/drivers/mt_wifi -name "rt_profile.c" 2>/dev/null | head -1)
           if [ -z "$RTPROFILE" ]; then echo "⚠️ 未找到 rt_profile.c"; exit 0; fi
-          echo "路径: $RTPROFILE"
           cp "$RTPROFILE" "$RTPROFILE.bak"
-
-          echo "==== 修复前 netif_rx_ni 出现位置 ===="
-          grep -n "netif_rx_ni" "$RTPROFILE" || echo "(无)"
-
-          # Linux 6.6 中 netif_rx_ni 已删除，用 netif_rx 替代
+          echo "修复前:"; grep -n "netif_rx_ni" "$RTPROFILE" || echo "(无)"
           sed -i 's/netif_rx_ni(/netif_rx(/g' "$RTPROFILE"
+          echo "修复后:"; grep -n "netif_rx" "$RTPROFILE" || echo "(无)"
+          [ "$(grep -c 'netif_rx_ni' "$RTPROFILE" || true)" -eq 0 ] && echo "✅ 完成" || echo "⚠️ 还有残留"
+
+      # ============================================================
+      # 修复 4：mt_cmd.c 的 4 处错误
+      # ============================================================
+      - name: 修复 mt_cmd.c 的 4 处错误
+        working-directory: ImmortalWrt
+        run: |
+          MTCMD=$(find package/mtk/drivers/mt_wifi -name "mt_cmd.c" 2>/dev/null | head -1)
+          if [ -z "$MTCMD" ]; then echo "⚠️ 未找到 mt_cmd.c"; exit 0; fi
+          echo "路径: $MTCMD"
+          cp "$MTCMD" "$MTCMD.bak"
+
+          python3 << 'PYEOF'
+          import re, sys
+          path = sys.argv[1] if len(sys.argv) > 1 else "package/mtk/drivers/mt_wifi/src/mt_wifi/mcu/mt_cmd.c"
+
+          with open(path, 'r') as f:
+              lines = f.readlines()
+
+          # 找函数名列表
+          targets = [
+              'static VOID MtCmdGetRXDCOCCalResultRsp',
+              'static VOID MtCmdGetTXDPDCalResultRsp',
+          ]
+
+          out = []
+          i = 0
+          inserted = 0
+          while i < len(lines):
+              line = lines[i]
+              matched = False
+              for t in targets:
+                  if t in line:
+                      matched = True
+                      break
+              if matched:
+                  out.append(line)
+                  i += 1
+                  # 等函数签名的下一行（通常是 { 单独一行）
+                  while i < len(lines):
+                      out.append(lines[i])
+                      if '{' in lines[i]:
+                          # 在 { 后面插入 pAd 声明
+                          out.append('\tRTMP_ADAPTER *pAd = NULL;\n')
+                          inserted += 1
+                          i += 1
+                          break
+                      i += 1
+                  continue
+              out.append(line)
+              i += 1
+
+          content = ''.join(out)
+
+          # 修复尾部多括号：`, ret))` → `, (int)ret)`
+          before1 = content.count(', ret))')
+          content = content.replace(', ret))', ', (int)ret)')
+          # 修复：`, chGroup))` → `, (int)chGroup)`
+          before2 = content.count(', chGroup))')
+          content = content.replace(', chGroup))', ', (int)chGroup)')
+
+          with open(path, 'w') as f:
+              f.write(content)
+
+          print(f"✅ 插入 pAd 声明: {inserted} 处")
+          print(f"✅ 修复 ret)) : {before1} 处")
+          print(f"✅ 修复 chGroup)) : {before2} 处")
+          PYEOF
+
+          # 注意：上面 Python 脚本路径写死了，这里校验一下
+          MTCMD_REAL=$(find package/mtk/drivers/mt_wifi -name "mt_cmd.c" 2>/dev/null | head -1)
+          echo ""
+          echo "==== 修复后 10377 附近 ===="
+          sed -n '10370,10390p' "$MTCMD_REAL"
 
           echo ""
-          echo "==== 修复后 ===="
-          grep -n "netif_rx" "$RTPROFILE" || echo "(无)"
+          echo "==== 修复后 11595~11615 附近 ===="
+          sed -n '11598,11615p' "$MTCMD_REAL"
 
-          COUNT=$(grep -c "netif_rx_ni" "$RTPROFILE" || true)
-          if [ "$COUNT" -eq 0 ]; then
-            echo "✅ netif_rx_ni 已全部替换为 netif_rx"
-          else
-            echo "⚠️ 还剩 $COUNT 处 netif_rx_ni"
-          fi
+          echo ""
+          echo "==== 修复后 11725 附近 ===="
+          sed -n '11723,11740p' "$MTCMD_REAL"
 
       # ============================================================
       # 加载设备配置
