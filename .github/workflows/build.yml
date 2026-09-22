@@ -199,36 +199,27 @@ jobs:
             } >> "$MTWIFI_MK"
           fi
 
-      # ============================================================
-      # 修复 1：ap_cfg.c 的 pStaMacAddr 未声明
-      # ============================================================
+      # 修复 1：ap_cfg.c
       - name: 修复 1-ap_cfg.c 的 pStaMacAddr
         working-directory: ImmortalWrt
         run: |
           APCFG=$(find package/mtk/drivers/mt_wifi -name "ap_cfg.c" 2>/dev/null | head -1)
-          [ -n "$APCFG" ] || { echo "⚠️ 未找到"; exit 0; }
+          [ -n "$APCFG" ] || { echo "未找到"; exit 0; }
           cp "$APCFG" "$APCFG.bak"
           sed -i 's/^\(\s*\)os_alloc_mem(NULL, &pStaMacAddr, MAC_ADDR_LEN);/\1PUCHAR pStaMacAddr = NULL;\n\1os_alloc_mem(NULL, \&pStaMacAddr, MAC_ADDR_LEN);/g' "$APCFG"
-          DECL=$(grep -c "PUCHAR pStaMacAddr = NULL;" "$APCFG" || true)
-          USE=$(grep -c "os_alloc_mem(NULL, &pStaMacAddr" "$APCFG" || true)
-          echo "✅ ap_cfg.c: 声明=$DECL 使用=$USE"
+          echo "ap_cfg.c 修复完成"
 
-      # ============================================================
-      # 修复 2：Makefile 全局定义 7 个预校准宏（关键改动）
-      # 从文件级 #define 改为 Makefile 全局 -D，所有文件都能看到
-      # ============================================================
-      - name: 修复 2-Makefile 里全局定义 7 个预校准宏
+      # 修复 2：Makefile 全局宏
+      - name: 修复 2-Makefile 里全局定义预校准宏
         working-directory: ImmortalWrt
         run: |
           MTWIFI_MK="package/mtk/drivers/mt_wifi/Makefile"
-          [ -f "$MTWIFI_MK" ] || { echo "⚠️ 未找到 $MTWIFI_MK"; exit 0; }
+          [ -f "$MTWIFI_MK" ] || { echo "未找到 $MTWIFI_MK"; exit 0; }
           cp "$MTWIFI_MK" "$MTWIFI_MK.bak"
-
           if grep -q "MTK_PRE_CAL_LAYOUT_FIX" "$MTWIFI_MK"; then
-            echo "⏭️ 已修复过，跳过"
+            echo "已修复过，跳过"
             exit 0
           fi
-
           {
             echo ''
             echo '# ===== MTK_PRE_CAL_LAYOUT_FIX ====='
@@ -245,78 +236,41 @@ jobs:
             echo 'EXTRA_CFLAGS += -DDPDPART2_IMAGE_SIZE=0x1000'
             echo 'EXTRA_CFLAGS += -DPRE_CAL_SIZE_DUAL_CARD=0x20000'
           } >> "$MTWIFI_MK"
+          echo "Makefile 已注入全局宏定义"
+          grep -A 13 "MTK_PRE_CAL_LAYOUT_FIX" "$MTWIFI_MK" | head -13
 
-          echo "✅ Makefile 已注入全局宏定义"
-          echo "==== 验证 ===="
-          grep -A 15 "MTK_PRE_CAL_LAYOUT_FIX" "$MTWIFI_MK" | head -15
-
-      # ============================================================
-      # 修复 3：rt_profile.c 的 netif_rx_ni（Linux 6.6 已删除）
-      # ============================================================
+      # 修复 3：rt_profile.c
       - name: 修复 3-rt_profile.c 的 netif_rx_ni
         working-directory: ImmortalWrt
         run: |
           RTPROFILE=$(find package/mtk/drivers/mt_wifi -name "rt_profile.c" 2>/dev/null | head -1)
-          [ -n "$RTPROFILE" ] || { echo "⚠️ 未找到"; exit 0; }
+          [ -n "$RTPROFILE" ] || { echo "未找到"; exit 0; }
           cp "$RTPROFILE" "$RTPROFILE.bak"
           sed -i 's/netif_rx_ni(/netif_rx(/g' "$RTPROFILE"
-          REMAIN=$(grep -c 'netif_rx_ni' "$RTPROFILE" || true)
-          [ "$REMAIN" -eq 0 ] && echo "✅ rt_profile.c 修复完成" || echo "⚠️ 还剩 $REMAIN"
+          echo "rt_profile.c 修复完成"
 
-      # ============================================================
-      # 修复 4：mt_cmd.c 的 pAd 未声明 + 多余括号
-      # ============================================================
+      # 修复 4：mt_cmd.c（用 sed，避免 python 引号问题）
       - name: 修复 4-mt_cmd.c 的 4 处错误
         working-directory: ImmortalWrt
         run: |
           MTCMD=$(find package/mtk/drivers/mt_wifi -name "mt_cmd.c" 2>/dev/null | head -1)
-          [ -n "$MTCMD" ] || { echo "⚠️ 未找到"; exit 0; }
+          [ -n "$MTCMD" ] || { echo "未找到"; exit 0; }
           cp "$MTCMD" "$MTCMD.bak"
 
-          python3 - "$MTCMD" << 'PYEOF'
-import sys
-path = sys.argv[1]
-with open(path, 'r') as f:
-    content = f.read()
+          # 修 1：多余的 ) 括号
+          sed -i 's/, ret))/, (int)ret)/g' "$MTCMD"
+          # 修 2：多余的 ) 括号
+          sed -i 's/, chGroup))/, (int)chGroup)/g' "$MTCMD"
+          # 修 3+4：两个函数里的 MTWF_DBG(pAd, 改成 MTWF_DBG(NULL,
+          sed -i '10369,10475s/MTWF_DBG(pAd,/MTWF_DBG(NULL,/g' "$MTCMD"
 
-# 1) 修复多余括号
-c1 = content.count(', ret))')
-content = content.replace(', ret))', ', (int)ret)')
-c2 = content.count(', chGroup))')
-content = content.replace(', chGroup))', ', (int)chGroup)')
+          echo "mt_cmd.c 修复完成"
+          echo "验证："
+          echo "  残留 ret)) : $(grep -c ', ret))' "$MTCMD" || echo 0)"
+          echo "  残留 chGroup)) : $(grep -c ', chGroup))' "$MTCMD" || echo 0)"
+          echo "  该范围内残留 MTWF_DBG(pAd, : $(sed -n '10369,10475p' "$MTCMD" | grep -c 'MTWF_DBG(pAd,' || echo 0)"
 
-# 2) 给两个函数开头加 pAd 声明
-inserted = 0
-for func in ['MtCmdGetRXDCOCCalResultRsp', 'MtCmdGetTXDPDCalResultRsp']:
-    marker = f'static VOID {func}'
-    idx = content.find(marker)
-    if idx < 0:
-        continue
-    brace = content.find('{', idx)
-    if brace < 0:
-        continue
-    # 检查是否已经插入
-    check = content[brace+1:brace+200]
-    if 'RTMP_ADAPTER *pAd' in check:
-        continue
-    decl = '\n\tRTMP_ADAPTER *pAd = NULL;'
-    content = content[:brace+1] + decl + content[brace+1:]
-    inserted += 1
-
-with open(path, 'w') as f:
-    f.write(content)
-
-print(f"✅ mt_cmd.c 修复: pAd 插入 {inserted} 处, ret)) 修 {c1} 处, chGroup)) 修 {c2} 处")
-PYEOF
-
-          echo "==== 验证 ===="
-          echo "pAd 声明数: $(grep -c 'RTMP_ADAPTER \*pAd = NULL;' "$MTCMD" || echo 0)"
-          echo "残留 ret)): $(grep -c ', ret))' "$MTCMD" || echo 0)"
-          echo "残留 chGroup)): $(grep -c ', chGroup))' "$MTCMD" || echo 0)"
-
-      # ============================================================
-      # 加载设备配置
-      # ============================================================
+      # 加载配置
       - name: 加载设备配置
         working-directory: ImmortalWrt
         run: |
@@ -326,10 +280,8 @@ PYEOF
             AX3000T-stock) TARGET_DEVICE="xiaomi_mi-router-ax3000t" ;;
             AX3000T-112m)  TARGET_DEVICE="xiaomi_mi-router-ax3000t-mtkuboot" ;;
           esac
-          echo "📦 目标设备: $TARGET_DEVICE"
-
+          echo "目标设备: $TARGET_DEVICE"
           cp "../mt7981-ax3000-slim.config" .config
-
           for dev in xiaomi_mi-router-wr30u-stock xiaomi_mi-router-wr30u-ubootmod \
                      xiaomi_mi-router-ax3000t xiaomi_mi-router-ax3000t-mtkuboot \
                      xiaomi_mi-router-ax3000t-ubootmod; do
@@ -338,11 +290,9 @@ PYEOF
               sed -i "s/^CONFIG_TARGET_DEVICE_PACKAGES_mediatek_filogic_DEVICE_${dev}=/# CONFIG_TARGET_DEVICE_PACKAGES_mediatek_filogic_DEVICE_${dev} is not set #/" .config
             fi
           done
-
           if [ -f "../seed.config" ]; then
             grep '^CONFIG_PACKAGE_' ../seed.config >> .config 2>/dev/null || true
           fi
-
           for pkg in shadow shadow-common shadow-utils shadow-chage shadow-chfn shadow-chgpasswd \
                      shadow-chpasswd shadow-chsh shadow-expiry shadow-faillog shadow-gpasswd \
                      shadow-groupadd shadow-groupdel shadow-groupmems shadow-groupmod shadow-groups \
@@ -354,17 +304,14 @@ PYEOF
             sed -i "/CONFIG_PACKAGE_${pkg}=/d" .config
             echo "# CONFIG_PACKAGE_${pkg} is not set" >> .config
           done
-
           sed -i '/CONFIG_SHADOW_PASSWORDS/d' .config
           echo "# CONFIG_SHADOW_PASSWORDS is not set" >> .config
           sed -i '/CONFIG_LUCI_LANG_zh_Hans/d' .config
           echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
-
           make oldconfig < /dev/null
-
           SELECTED=$(grep -c "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y" .config || true)
-          [ "$SELECTED" -eq 1 ] || { echo "❌ 设备数=$SELECTED"; exit 1; }
-          echo "✅ 配置加载完成"
+          [ "$SELECTED" -eq 1 ] || { echo "设备数=$SELECTED"; exit 1; }
+          echo "配置加载完成"
 
       - name: 编译 tools 和 toolchain
         working-directory: ImmortalWrt
@@ -375,8 +322,7 @@ PYEOF
 
       - name: 编译 Linux 内核
         working-directory: ImmortalWrt
-        run: |
-          make target/linux/compile -j$(nproc) V=s 2>&1 | tail -10
+        run: make target/linux/compile -j$(nproc) V=s 2>&1 | tail -10
 
       - name: 多线程编译
         if: ${{ inputs.multithreading == true }}
@@ -394,30 +340,18 @@ PYEOF
           make -j1 V=s 2>&1 | tee build.log
           exit ${PIPESTATUS[0]}
 
-      # ============================================================
-      # ★ 抓取编译错误（直接显示在 Actions 网页）
-      # ============================================================
       - name: 抓取编译错误
         if: always()
         working-directory: ImmortalWrt
         run: |
-          echo "======================================================"
           echo "===== 真正的 error: 行（排除 openssl）====="
-          echo "======================================================"
           if [ -f build.log ]; then
             grep -E "\.c:[0-9]+:[0-9]+: error:" build.log | grep -v "openssl" | head -30 || echo "(无)"
             echo ""
-            echo "======================================================"
             echo "===== 所有 failed to build ====="
-            echo "======================================================"
             grep "failed to build" build.log | sort -u || echo "(无)"
-            echo ""
-            echo "======================================================"
-            echo "===== mt_wifi 相关 error（含前后 2 行）====="
-            echo "======================================================"
-            grep -n -A 2 -B 1 "error:" build.log | grep -A 2 -B 1 "mt_wifi" | head -80 || echo "(无)"
           else
-            echo "❌ build.log 不存在"
+            echo "build.log 不存在"
           fi
 
       - name: 上传编译日志
