@@ -9,29 +9,23 @@ jobs:
   diag:
     runs-on: ubuntu-22.04
     steps:
-      - name: 克隆仓库
+      - name: 克隆闭源仓库
         uses: actions/checkout@v5
         with:
-          repository: 'padawanonly/immortalwrt-mt798x-6.6'
+          repository: 'padavanonly/immortalwrt-mt798x-6.6'
           ref: 'openwrt-24.10-6.6'
           path: ImmortalWrt
           fetch-depth: 1
-        continue-on-error: true
-
-      - name: 如果上面失败，用正确仓库名
-        run: |
-          if [ ! -d ImmortalWrt/package ]; then
-            rm -rf ImmortalWrt
-            git clone --depth 1 --branch openwrt-24.10-6.6 \
-              https://github.com/padawanonly/immortalwrt-mt798x-6.6.git ImmortalWrt
-          fi
-          ls ImmortalWrt/package/mtk/drivers/mt_wifi/src/mt_wifi/ 2>/dev/null || echo "❌ 路径不对"
 
       - name: 诊断 mt_cmd.c
         working-directory: ImmortalWrt
         run: |
+          echo "=================================================="
+          echo "===== 找 mt_cmd.c ====="
+          echo "=================================================="
           MTCMD=$(find package/mtk/drivers/mt_wifi -name "mt_cmd.c" 2>/dev/null | head -1)
           echo "路径: $MTCMD"
+          [ -n "$MTCMD" ] || { echo "❌ 未找到"; exit 1; }
 
           echo ""
           echo "=================================================="
@@ -59,11 +53,11 @@ jobs:
 
           echo ""
           echo "=================================================="
-          echo "===== 各错误所在函数的签名（往上找） ====="
+          echo "===== 各错误所在函数签名（往上找）====="
           echo "=================================================="
           for L in 10377 10465 11606 11730; do
-            echo "--- 第 $L 行往上找函数 ---"
-            head -n $L "$MTCMD" | grep -nE "^(static |VOID |INT |UINT |BOOLEAN |NDIS_STATUS |void |int ).*\(" | tail -1
+            echo "--- 第 $L 行所在函数 ---"
+            head -n $L "$MTCMD" | grep -nE "^(static |VOID |INT |UINT |BOOLEAN |NDIS_STATUS |void |int |unsigned ).*\(" | tail -1
             echo ""
           done
 
@@ -71,4 +65,5 @@ jobs:
           echo "===== MTWF_DBG 宏定义 ====="
           echo "=================================================="
           DEBUGH=$(find package/mtk/drivers/mt_wifi -name "debug.h" 2>/dev/null | head -1)
-          grep -n "define MTWF_DBG" "$DEBUGH" || echo "(未找到)"
+          echo "路径: $DEBUGH"
+          grep -n -A 10 "define MTWF_DBG" "$DEBUGH" | head -30 || echo "(未找到)"
