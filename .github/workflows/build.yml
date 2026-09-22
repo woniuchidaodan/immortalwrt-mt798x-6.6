@@ -52,7 +52,7 @@ jobs:
         uses: actions/checkout@v5
 
       # ============================================================
-      # ★ 换回原分支 openwrt-24.10-6.6
+      # 原分支 openwrt-24.10-6.6
       # ============================================================
       - name: 克隆闭源 ImmortalWrt 仓库
         uses: actions/checkout@v5
@@ -229,18 +229,15 @@ jobs:
           echo "路径: $EEPROM"
           cp "$EEPROM" "$EEPROM.bak"
 
-          # 检查是否已经修复过
           if grep -q "MTK_PRE_CAL_LAYOUT_FIX" "$EEPROM"; then
             echo "⏭️ 已修复过，跳过"
             exit 0
           fi
 
-          # 在文件开头（第一个 #include 之前）插入宏定义
-          # 用 sed 在第一个 #include 前插入
           sed -i '0,/^#include/{s/^#include/#define MTK_PRE_CAL_LAYOUT_FIX 1\n#define PRE_CAL_SIZE_ONE_CARD   0x10000\n#define PRECALPART_OFFSET       0x0\n#define DCOC_IMAGE_SIZE         0x1000\n#define TXDPD_IMAGE1_SIZE       0x1000\n#define TXDPD_IMAGE2_SIZE       0x1000\n#define DPDPART1_OFFSET         0x1000\n#define DPDPART2_OFFSET         0x2000\n#include/}' "$EEPROM"
 
-          echo "==== 修复后前 30 行 ===="
-          head -30 "$EEPROM"
+          echo "==== 修复后前 20 行 ===="
+          head -20 "$EEPROM"
 
           echo ""
           echo "==== 验证宏定义 ===="
@@ -251,6 +248,34 @@ jobs:
               echo "❌ $m 缺失"
             fi
           done
+
+      # ============================================================
+      # ★ 修复 3：rt_profile.c 的 netif_rx_ni 在 Linux 6.6 被删除
+      # ============================================================
+      - name: 修复 rt_profile.c 的 netif_rx_ni
+        working-directory: ImmortalWrt
+        run: |
+          RTPROFILE=$(find package/mtk/drivers/mt_wifi -name "rt_profile.c" 2>/dev/null | head -1)
+          if [ -z "$RTPROFILE" ]; then echo "⚠️ 未找到 rt_profile.c"; exit 0; fi
+          echo "路径: $RTPROFILE"
+          cp "$RTPROFILE" "$RTPROFILE.bak"
+
+          echo "==== 修复前 netif_rx_ni 出现位置 ===="
+          grep -n "netif_rx_ni" "$RTPROFILE" || echo "(无)"
+
+          # Linux 6.6 中 netif_rx_ni 已删除，用 netif_rx 替代
+          sed -i 's/netif_rx_ni(/netif_rx(/g' "$RTPROFILE"
+
+          echo ""
+          echo "==== 修复后 ===="
+          grep -n "netif_rx" "$RTPROFILE" || echo "(无)"
+
+          COUNT=$(grep -c "netif_rx_ni" "$RTPROFILE" || true)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "✅ netif_rx_ni 已全部替换为 netif_rx"
+          else
+            echo "⚠️ 还剩 $COUNT 处 netif_rx_ni"
+          fi
 
       # ============================================================
       # 加载设备配置
