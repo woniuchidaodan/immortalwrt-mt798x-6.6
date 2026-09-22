@@ -32,9 +32,6 @@ jobs:
     outputs:
       fw_version: ${{ steps.extract-version.outputs.fw_version }}
     steps:
-      # ============================================================
-      # 1. 环境准备
-      # ============================================================
       - name: 释放磁盘空间
         run: |
           df -h
@@ -55,13 +52,13 @@ jobs:
         uses: actions/checkout@v5
 
       # ============================================================
-      # 2. 克隆闭源源码（★ 切换到新分支 mt798x-mt799x-6.6-mtwifi）
+      # ★ 换回原分支 openwrt-24.10-6.6
       # ============================================================
       - name: 克隆闭源 ImmortalWrt 仓库
         uses: actions/checkout@v5
         with:
           repository: 'padavanonly/immortalwrt-mt798x-6.6'
-          ref: 'mt798x-mt799x-6.6-mtwifi'
+          ref: 'openwrt-24.10-6.6'
           path: ImmortalWrt
           fetch-depth: 0
 
@@ -71,9 +68,6 @@ jobs:
           git describe --tags 2>/dev/null || true
           git log -1 --oneline
 
-      # ============================================================
-      # 3. 第三方软件包
-      # ============================================================
       - name: 克隆 UA3F
         working-directory: ImmortalWrt
         run: git clone https://github.com/SunBK201/UA3F.git package/UA3F || true
@@ -112,9 +106,6 @@ jobs:
             sed -i -E 's/\+mdadm\b//g' "$file" || true
           done
 
-      # ============================================================
-      # 4. 复制配置 + feeds
-      # ============================================================
       - name: 复制自定义配置
         run: |
           cp -f diy.sh seed.config mt7981-ax3000-slim.config ImmortalWrt/ 2>/dev/null || true
@@ -128,9 +119,6 @@ jobs:
         working-directory: ImmortalWrt
         run: ./scripts/feeds update -a && ./scripts/feeds install -a
 
-      # ============================================================
-      # 5. 修复下载源 + 依赖
-      # ============================================================
       - name: 替换下载源
         working-directory: ImmortalWrt
         run: |
@@ -215,38 +203,57 @@ jobs:
           fi
 
       # ============================================================
-      # 6. ★ 修复 ap_cfg.c 的 pStaMacAddr 未声明（保底，新分支可能已修）
+      # ★ 修复 1：ap_cfg.c 的 pStaMacAddr 未声明
       # ============================================================
       - name: 修复 ap_cfg.c 的 pStaMacAddr 未声明
         working-directory: ImmortalWrt
         run: |
           APCFG=$(find package/mtk/drivers/mt_wifi -name "ap_cfg.c" 2>/dev/null | head -1)
-          if [ -z "$APCFG" ]; then
-            echo "⚠️ 未找到 ap_cfg.c，跳过"
-            exit 0
-          fi
+          if [ -z "$APCFG" ]; then echo "⚠️ 未找到"; exit 0; fi
           echo "路径: $APCFG"
-
-          # 先检查是否已经有对应问题
-          USE_COUNT=$(grep -c "os_alloc_mem(NULL, &pStaMacAddr" "$APCFG" || true)
-          DECL_COUNT=$(grep -c "PUCHAR pStaMacAddr = NULL;" "$APCFG" || true)
-          echo "修改前：使用数=$USE_COUNT，声明数=$DECL_COUNT"
-
-          if [ "$DECL_COUNT" -ge "$USE_COUNT" ] && [ "$USE_COUNT" -gt 0 ]; then
-            echo "✅ 新分支已修复，跳过"
-            exit 0
-          fi
-
           cp "$APCFG" "$APCFG.bak"
           sed -i 's/^\(\s*\)os_alloc_mem(NULL, &pStaMacAddr, MAC_ADDR_LEN);/\1PUCHAR pStaMacAddr = NULL;\n\1os_alloc_mem(NULL, \&pStaMacAddr, MAC_ADDR_LEN);/g' "$APCFG"
-
           DECL_COUNT=$(grep -c "PUCHAR pStaMacAddr = NULL;" "$APCFG" || true)
           USE_COUNT=$(grep -c "os_alloc_mem(NULL, &pStaMacAddr" "$APCFG" || true)
-          echo "修改后：声明数=$DECL_COUNT，使用数=$USE_COUNT"
-          [ "$DECL_COUNT" -ge "$USE_COUNT" ] && echo "✅ 修复成功" || echo "⚠️ 修复可能失败"
+          echo "声明数: $DECL_COUNT，使用数: $USE_COUNT"
+          [ "$DECL_COUNT" -ge "$USE_COUNT" ] && echo "✅ pStaMacAddr 修复成功" || echo "⚠️ 可能失败"
 
       # ============================================================
-      # 7. 加载设备配置
+      # ★ 修复 2：eeprom.c 缺失的 7 个预校准宏
+      # ============================================================
+      - name: 修复 eeprom.c 缺失的预校准宏
+        working-directory: ImmortalWrt
+        run: |
+          EEPROM=$(find package/mtk/drivers/mt_wifi -name "eeprom.c" 2>/dev/null | head -1)
+          if [ -z "$EEPROM" ]; then echo "⚠️ 未找到 eeprom.c"; exit 0; fi
+          echo "路径: $EEPROM"
+          cp "$EEPROM" "$EEPROM.bak"
+
+          # 检查是否已经修复过
+          if grep -q "MTK_PRE_CAL_LAYOUT_FIX" "$EEPROM"; then
+            echo "⏭️ 已修复过，跳过"
+            exit 0
+          fi
+
+          # 在文件开头（第一个 #include 之前）插入宏定义
+          # 用 sed 在第一个 #include 前插入
+          sed -i '0,/^#include/{s/^#include/#define MTK_PRE_CAL_LAYOUT_FIX 1\n#define PRE_CAL_SIZE_ONE_CARD   0x10000\n#define PRECALPART_OFFSET       0x0\n#define DCOC_IMAGE_SIZE         0x1000\n#define TXDPD_IMAGE1_SIZE       0x1000\n#define TXDPD_IMAGE2_SIZE       0x1000\n#define DPDPART1_OFFSET         0x1000\n#define DPDPART2_OFFSET         0x2000\n#include/}' "$EEPROM"
+
+          echo "==== 修复后前 30 行 ===="
+          head -30 "$EEPROM"
+
+          echo ""
+          echo "==== 验证宏定义 ===="
+          for m in PRE_CAL_SIZE_ONE_CARD PRECALPART_OFFSET DCOC_IMAGE_SIZE TXDPD_IMAGE1_SIZE TXDPD_IMAGE2_SIZE DPDPART1_OFFSET DPDPART2_OFFSET; do
+            if grep -q "define $m" "$EEPROM"; then
+              echo "✅ $m"
+            else
+              echo "❌ $m 缺失"
+            fi
+          done
+
+      # ============================================================
+      # 加载设备配置
       # ============================================================
       - name: 加载设备配置
         working-directory: ImmortalWrt
@@ -294,47 +301,22 @@ jobs:
           make oldconfig < /dev/null
 
           SELECTED=$(grep -c "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y" .config || true)
-          SELECTED=${SELECTED:-0}
           [ "$SELECTED" -eq 1 ] || { echo "❌ 设备数=$SELECTED"; exit 1; }
           echo "✅ 配置加载完成：$TARGET_DEVICE"
 
-      # ============================================================
-      # 8. 编译 tools + toolchain
-      # ============================================================
       - name: 编译 tools 和 toolchain
         working-directory: ImmortalWrt
         run: |
           set -o pipefail
-          echo "===== tools ====="
-          make tools/install -j$(nproc) V=s 2>&1 | tail -20
-          echo "✅ tools 完成"
-          echo "===== toolchain ====="
-          make toolchain/install -j$(nproc) V=s 2>&1 | tail -20
-          echo "✅ toolchain 完成"
-          echo "===== 验证 musl 链接器 ===="
+          make tools/install -j$(nproc) V=s 2>&1 | tail -10
+          make toolchain/install -j$(nproc) V=s 2>&1 | tail -10
           ls -la staging_dir/toolchain-*/lib/ld-musl-* 2>/dev/null || echo "⚠️ 未找到 ld-musl"
 
-      # ============================================================
-      # 9. 编译 Linux 内核
-      # ============================================================
       - name: 编译 Linux 内核
         working-directory: ImmortalWrt
         run: |
-          echo "==== 编译 target/linux ===="
-          make target/linux/compile -j$(nproc) V=s 2>&1 | tee kernel.log | tail -30
-          echo ""
-          echo "==== 验证内核 .config ===="
-          ls -la build_dir/target-aarch64_cortex-a53_musl/linux-mediatek_filogic/linux-6.6.133/.config 2>/dev/null || echo "⚠️ 内核 .config 不存在"
+          make target/linux/compile -j$(nproc) V=s 2>&1 | tail -20
 
-      - name: 编译前上传配置
-        uses: actions/upload-artifact@v6
-        with:
-          name: config-before-build
-          path: ImmortalWrt/.config
-
-      # ============================================================
-      # 10. 主编译
-      # ============================================================
       - name: 多线程编译
         if: ${{ inputs.multithreading == true }}
         working-directory: ImmortalWrt
@@ -351,17 +333,12 @@ jobs:
           make -j1 V=s 2>&1 | tee build.log
           exit ${PIPESTATUS[0]}
 
-      # ============================================================
-      # 11. 上传日志 + 检查固件
-      # ============================================================
       - name: 上传编译日志
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: build-log
-          path: |
-            ImmortalWrt/build.log
-            ImmortalWrt/kernel.log
+          path: ImmortalWrt/build.log
 
       - name: 检查固件
         if: always()
@@ -369,10 +346,8 @@ jobs:
         run: |
           echo "==== bin/targets ===="
           ls -la bin/targets/mediatek/filogic/ 2>/dev/null || true
-          echo ""
           echo "==== .bin 文件 ===="
           find bin/targets -name "*.bin" -type f 2>/dev/null | head -20 || true
-          echo ""
           echo "==== 失败包 ===="
           grep "failed to build" build.log 2>/dev/null | sort -u || true
 
@@ -390,9 +365,6 @@ jobs:
           name: ImmortalWrt_${{ env.FW_VERSION }}_${{ env.DEVICE }}_${{ env.LAYOUT }}
           path: ImmortalWrt/bin/targets
 
-  # ============================================================
-  # 📦 发布
-  # ============================================================
   release:
     name: 📦 发布固件
     needs: build
